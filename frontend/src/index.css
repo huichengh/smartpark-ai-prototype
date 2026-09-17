@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-nav-deep font-sans text-slate-200 antialiased;
+    /* 深色主题下浏览器默认控件也应跟随 */
+    color-scheme: dark;
+  }
+
+  /* 滚动条：与深色主题统一，避免出现亮色轨道 */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.22);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.36);
+  }
+
+  /* 数字统一使用等宽字体，避免指标跳动时宽度抖动 */
+  .font-num {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  /* Tailwind 默认不含 white/8 这类低比例透明度，这里补齐常用档位 */
+  .border-white\/8 {
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  .bg-white\/8 {
+    background-color: rgba(255, 255, 255, 0.08);
+  }
+  .bg-white\/6 {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+}

@@ -1,0 +1,21 @@
+# 统一换行符：仓库内存 LF，检出到 Windows 时也保持 LF，
+# 避免同一文件在不同平台上被识别成"整文件改动"。
+* text=auto eol=lf
+
+# 二进制资源不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+*.db binary
+*.woff binary
+*.woff2 binary
+
+# 生成物 / 锁文件在 diff 里折叠，避免挤占代码评审视线
+frontend/package-lock.json linguist-generated=true
+frontend/openapi.json linguist-generated=true
+docs/demo/*.html linguist-documentation=true
+
+# 语言统计：不要把这些目录算进代码占比
+*.md linguist-documentation

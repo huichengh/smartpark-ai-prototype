@@ -1,0 +1,36 @@
+# 园智汇 · AI 产业园区智慧运营管理平台 —— 后端依赖
+# Python 3.11+（演示环境实测 3.13）
+#
+# 安装：
+#   python -m venv .venv
+#   .venv/Scripts/activate        # Windows
+#   source .venv/bin/activate     # macOS / Linux
+#   pip install -r requirements.txt
+
+# ---- Web 框架 ----
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+# ---- 数据校验与配置 ----
+pydantic>=2.6
+pydantic-settings>=2.2
+
+# ---- ORM 与数据库驱动 ----
+SQLAlchemy>=2.0
+# 正式环境切换到 PostgreSQL 时安装：
+# psycopg[binary]>=3.1
+
+# ---- 认证与安全（缺任一依赖时核心模块内置降级实现）----
+passlib>=1.7.4
+bcrypt>=4.0
+python-jose[cryptography]>=3.3
+
+# ---- 数据分析（EVM 挣值、能耗趋势、报表统计）----
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+
+# ---- 缓存与异步任务（演示环境可选，架构已预留）----
+# redis>=5.0
+# celery>=5.3

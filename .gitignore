@@ -1,0 +1,53 @@
+# ============================================================
+# 园智汇 · AI 产业园区智慧运营管理平台
+# ============================================================
+
+# ------------------------------------------------ Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------ Node / 前端
+node_modules/
+frontend/dist/
+frontend/.vite/
+.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ------------------------------------------------ 运行时数据
+# 演示库由 `python run.py --seed` 确定性重建（约 5 万行），是二进制文件，
+# 不入库；这样别人 clone 后自己生成一份干净的演示数据。
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+backend/data/*.sqlite3
+
+# ------------------------------------------------ 环境变量与密钥
+.env
+.env.local
+.env.*.local
+
+# ------------------------------------------------ 本地工作区
+# 记忆笔记、巡检输出、临时文件；工具脚本已整理到 tools/e2e/ 随仓库发布
+.workbuddy/
+
+# ------------------------------------------------ 工具产物
+tools/e2e/*.json
+tools/e2e/*.out
+
+# ------------------------------------------------ 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
