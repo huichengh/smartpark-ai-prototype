@@ -103,6 +103,9 @@ http.interceptors.request.use((config) => {
   if (t) {
     config.headers = config.headers ?? {}
     config.headers.Authorization = `Bearer ${t}`
+    // 同时带一份 X-Token：部署到反向代理后面时，网关可能注入/改写 Authorization，
+    // 后端会按"多来源候选、取第一个验得通的"来处理，真令牌因此不会被顶掉。
+    config.headers['X-Token'] = t
   }
   return config
 })

@@ -134,10 +134,19 @@ app.include_router(api_router, prefix=API_PREFIX)
 
 
 # ---------------------------------------------------------------- 前端产物托管
-# 单端口部署：把 frontend/dist 直接挂到后端，`python run.py` 一个进程就能访问完整平台
+# 单端口部署：把前端产物直接挂到后端，`python run.py` 一个进程就能访问完整平台
 # （演示、内网交付、云端发布都只需要暴露一个端口）。
-# dist 不存在时（未执行 `npx vite build`）自动退回纯 API 模式，/ 返回服务信息 JSON。
-DIST_DIR = BASE_DIR.parent / "frontend" / "dist"
+#
+# 产物候选目录（按顺序取第一个可用的）：
+#   1) frontend/dist —— vite 常规构建输出，本地开发 / 预览用
+#   2) backend/webui —— 部署时随服务一起打包的副本
+# 为什么要第 2 个：云端发布沙箱会排除构建产物目录（dist 属于 build output），
+# 只上传源码，于是线上会只剩 API、打不开界面。部署前把 dist 复制到 backend/webui
+# 就能随源码一起上传，服务启动即可用，也不必在沙箱里现场 npm build。
+# 两个都没有时（未执行 `npx vite build`）自动退回纯 API 模式，/ 返回服务信息 JSON。
+_FRONTEND_CANDIDATES = (BASE_DIR.parent / "frontend" / "dist", BASE_DIR / "webui")
+DIST_DIR = next((d for d in _FRONTEND_CANDIDATES if (d / "index.html").is_file()),
+                _FRONTEND_CANDIDATES[0])
 SPA_ENABLED = (DIST_DIR / "index.html").is_file()
 
 if SPA_ENABLED and (DIST_DIR / "assets").is_dir():
@@ -227,6 +236,7 @@ def meta() -> dict:
             {"level": "L3", "name": "高影响动作", "rule": "AI 只生成审批请求，必须人工审批，绝不自行执行"},
         ],
         "data_scope_levels": ["GROUP", "PARK", "DEPARTMENT", "PROJECT", "ENTERPRISE", "SELF"],
+        "runtime": _runtime_probe(),
         "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -275,7 +285,30 @@ def on_startup() -> None:
         db.close()
 
     logger.info("接口文档：http://%s:%s/docs", settings.BACKEND_HOST, settings.BACKEND_PORT)
+    logger.info("运行时自检：%s", _runtime_probe())
     logger.info("=" * 74)
+
+
+def _runtime_probe() -> str:
+    """打印关键可选依赖的可用情况。
+
+    认证/密码模块都有"缺依赖时退化到纯标准库"的兜底实现，但两条路径产出的
+    令牌格式不同。部署环境装不到可选依赖时会出现"签发能用、校验失败"的怪象，
+    启动时把实际生效的实现打出来，能一眼看出环境差异。
+    """
+    from app.core import security as sec
+
+    parts = [
+        f"jwt={'python-jose' if sec._HAS_JOSE else '内置 HMAC（退化）'}",
+        f"password={'bcrypt' if sec._HAS_BCRYPT else 'PBKDF2（退化）'}",
+    ]
+    try:
+        import jose
+
+        parts.append(f"python-jose={getattr(jose, '__version__', 'unknown')}")
+    except Exception:  # noqa: BLE001
+        parts.append("python-jose=未安装")
+    return " | ".join(parts)
 
 
 @app.on_event("shutdown")

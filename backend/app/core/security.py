@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import logging
 import os
 from typing import Annotated
 
@@ -15,6 +16,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.models import Role, RolePermission, Permission, User, UserParkScope, UserProjectScope
+
+logger = logging.getLogger("smartpark")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_PREFIX}/auth/login", auto_error=False)
 
@@ -69,6 +72,12 @@ except Exception:  # pragma: no cover
     _HAS_JOSE = False
 
 
+def _b64url_nopad(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
 def _fallback_encode(payload: dict) -> str:
     import base64
     import json
@@ -78,16 +87,41 @@ def _fallback_encode(payload: dict) -> str:
     return f"{body}.{sig}"
 
 
-def _fallback_decode(token: str) -> dict:
+def _decode_builtin(token: str) -> dict:
+    """纯标准库解码，作为 python-jose 的等价兜底实现。
+
+    三个必须同时满足的点（历史上都踩过）：
+    1. **同时支持 3 段 JWS 与 2 段紧凑格式**：jose 签的是 `header.payload.sig`，
+       本模块早期签的是 `payload.sig`。只认后者会导致"jose 签发、兜底校验"直接失败。
+    2. **签名两种编码都要试**：jose 用 base64url(原始摘要)，早期实现用 hexdigest。
+       不兼容就出现"自己签的令牌自己验不过"。
+    3. **必须校验 exp**：兜底路径曾经完全不看过期时间，等于过期令牌永久有效（真实安全漏洞）。
+    """
     import base64
     import json
 
-    body, sig = token.rsplit(".", 1)
-    expect = hmac.new(settings.SECRET_KEY.encode(), body.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expect):
+    parts = token.split(".")
+    if len(parts) == 3:
+        header_b64, payload_b64, sig = parts
+        body = f"{header_b64}.{payload_b64}"
+    elif len(parts) == 2:
+        payload_b64, sig = parts
+        body = payload_b64
+    else:
+        raise ValueError("token 格式不正确")
+
+    digest = hmac.new(settings.SECRET_KEY.encode(), body.encode(), hashlib.sha256).digest()
+    candidates = (digest.hex(), _b64url_nopad(digest))
+    if not any(hmac.compare_digest(sig, c) for c in candidates):
         raise ValueError("invalid token signature")
-    padded = body + "=" * (-len(body) % 4)
-    return json.loads(base64.urlsafe_b64decode(padded).decode())
+
+    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+
+    exp = payload.get("exp")
+    if exp is not None and int(exp) <= int(dt.datetime.now(dt.UTC).timestamp()):
+        raise ValueError("token 已过期")
+    return payload
 
 
 def create_access_token(data: dict, expires_minutes: int | None = None) -> str:
@@ -103,12 +137,27 @@ def create_access_token(data: dict, expires_minutes: int | None = None) -> str:
 
 
 def decode_token(token: str) -> dict:
+    """校验并解出令牌载荷。
+
+    两条实现必须互为兜底：部署环境的可选依赖往往装不全，python-jose 在
+    cryptography/ecdsa 缺失时会抛出**非 JWTError** 的异常；早期实现只捕获
+    JWTError，于是异常穿透出去变成 401 —— 表现为"登录成功，但所有接口都 401"，
+    而本地环境依赖完整、完全复现不出来。这里对所有异常都退到内置实现。
+    """
     if _HAS_JOSE:
         try:
             return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         except JWTError as exc:
-            raise ValueError(str(exc)) from exc
-    return _fallback_decode(token)
+            # jose 明确判定不合格；内置实现可兜住"签名编码不同"这种兼容性差异，
+            # 但同样会校验 exp，不会放宽过期策略。
+            try:
+                return _decode_builtin(token)
+            except Exception:
+                raise ValueError(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - 依赖后端异常，必须降级而不是 500/401
+            logger.warning("python-jose 解码异常，改用内置 HMAC 实现：%s", exc)
+            return _decode_builtin(token)
+    return _decode_builtin(token)
 
 
 # --------------------------------------------------------------------------
@@ -246,18 +295,60 @@ def load_auth_context(db: Session, user: User) -> AuthContext:
     return AuthContext(user, roles, perms, park_ids, project_ids)
 
 
+def _token_candidates(request: Request, oauth_token: str | None) -> list[str]:
+    """收集本次请求里所有可能的令牌来源。
+
+    为什么要"收集"而不是"取第一个"：部署在反向代理后面时，网关可能注入或改写
+    `Authorization` 头；一旦它覆盖了前端带来的真令牌，鉴权就会永远失败。
+    这里把所有来源都列出来逐个尝试验签，任一通过即认定身份——只要有一个来源
+    是可信的真令牌就不会被别的来源顶掉。
+    """
+    out: list[str] = []
+    if oauth_token:
+        out.append(oauth_token)
+    for key in ("X-Token", "X-Access-Token"):
+        v = request.headers.get(key)
+        if v:
+            out.append(v.split()[-1] if " " in v else v)
+    for key in ("smartpark_token", "access_token"):
+        v = request.cookies.get(key)
+        if v:
+            out.append(v)
+    # 去重且保持顺序
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for t in out:
+        if t and t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
+
+
 def get_current_auth(
     request: Request,
     token: Annotated[str | None, Depends(oauth2_scheme)] = None,
     db: Session = Depends(get_db),
 ) -> AuthContext:
-    if not token:
-        token = request.headers.get("X-Token") or request.cookies.get("smartpark_token")
-    if not token:
+    candidates = _token_candidates(request, token)
+    if not candidates:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录或登录已过期")
-    try:
-        payload = decode_token(token)
-    except Exception:
+
+    payload: dict | None = None
+    last_error: Exception | None = None
+    for cand in candidates:
+        try:
+            payload = decode_token(cand)
+            break
+        except Exception as exc:  # noqa: BLE001 - 换下一个来源继续尝试
+            last_error = exc
+    if payload is None:
+        # 令牌被拒的原因必须可查：曾经出现过"签发成功但自己校验不过"，没有日志只能靠猜。
+        logger.warning("本次请求的全部令牌来源都无法校验（共 %d 个，来源=%s，jwt_backend=%s）：%s",
+                       len(candidates),
+                       [k for k in ("Authorization", "X-Token", "X-Access-Token", "cookie")
+                        if request.headers.get(k) or request.cookies.get("smartpark_token")],
+                       "python-jose" if _HAS_JOSE else "内置 HMAC 退化实现",
+                       last_error)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录凭证无效，请重新登录")
     user_id = payload.get("sub")
     if not user_id:
