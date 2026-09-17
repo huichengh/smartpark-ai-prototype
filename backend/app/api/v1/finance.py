@@ -53,8 +53,9 @@ def list_bills(db: DbSession, auth: CurrentAuth,
         q = q.where(Bill.park_id == park_id)
     elif vis is not None:
         q = q.where(Bill.park_id.in_(vis)) if vis else q.where(Bill.id == -1)
-    if auth.enterprise_id:
-        q = q.where(Bill.enterprise_id == auth.enterprise_id)
+    ent_clause = auth.enterprise_scope_clause(Bill.enterprise_id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     if fee_type:
         q = q.where(Bill.fee_type == fee_type)
     if status_:
@@ -228,8 +229,7 @@ def bill_detail(bill_id: int, db: DbSession, auth: CurrentAuth) -> dict[str, Any
     b = db.get(Bill, bill_id)
     if not b or not auth.can_access_park(b.park_id):
         raise HTTPException(404, "账单不存在或无权访问")
-    if auth.enterprise_id and auth.enterprise_id != b.enterprise_id:
-        raise HTTPException(403, "企业账号只能查看本企业账单")
+    auth.require_enterprise(b.enterprise_id, "企业账号只能查看本企业账单")
     payments = list(db.scalars(select(Payment).where(Payment.bill_id == bill_id)
                                .order_by(Payment.pay_date.desc())).all())
     c = db.get(Contract, b.contract_id) if b.contract_id else None
@@ -267,6 +267,7 @@ def pay_bill(bill_id: int, payload: BillPayRequest, db: DbSession, auth: Current
     b = db.get(Bill, bill_id)
     if not b or not auth.can_access_park(b.park_id):
         raise HTTPException(404, "账单不存在或无权访问")
+    auth.require_enterprise(b.enterprise_id, "企业账号只能处理本企业账单")
     if b.status in ("PAID", "WAIVED"):
         raise HTTPException(400, f"账单状态为「{STATUS_NAMES.get(b.status, b.status)}」，不可再收款")
     amount = round(payload.amount, 2)
@@ -324,6 +325,7 @@ def dunning(bill_id: int, db: DbSession, auth: CurrentAuth, note: str | None = N
     b = db.get(Bill, bill_id)
     if not b or not auth.can_access_park(b.park_id):
         raise HTTPException(404, "账单不存在或无权访问")
+    auth.require_enterprise(b.enterprise_id, "企业账号只能处理本企业账单")
     if b.status in ("PAID", "WAIVED"):
         raise HTTPException(400, "账单已结清或减免，无需催收")
     b.dunning_count = (b.dunning_count or 0) + 1
@@ -350,8 +352,9 @@ def list_payments(db: DbSession, auth: CurrentAuth, park_id: int | None = None,
         q = q.where(Payment.park_id == park_id)
     elif vis is not None:
         q = q.where(Payment.park_id.in_(vis)) if vis else q.where(Payment.id == -1)
-    if auth.enterprise_id:
-        q = q.where(Payment.enterprise_id == auth.enterprise_id)
+    ent_clause = auth.enterprise_scope_clause(Payment.enterprise_id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     if enterprise_id:
         q = q.where(Payment.enterprise_id == enterprise_id)
     if bill_id:

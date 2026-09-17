@@ -230,8 +230,9 @@ def get_enterprise_profile(db: Session, auth: AuthContext, enterprise_id: int | 
         q = q.where(Enterprise.enterprise_name.like(f"%{enterprise_name}%"))
     if park_id:
         q = q.where(Enterprise.park_id == park_id)
-    if auth.enterprise_id and not auth.is_group_admin:
-        q = q.where(Enterprise.id == auth.enterprise_id)
+    ent_clause = auth.enterprise_scope_clause(Enterprise.id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     ents = [e for e in db.scalars(q).all() if e.park_id is None or auth.can_access_park(e.park_id)]
     if not ents:
         cand = _closest_enterprise_names(db, auth, enterprise_name)

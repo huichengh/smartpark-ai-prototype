@@ -63,6 +63,12 @@ def list_work_orders(db: DbSession, auth: CurrentAuth,
         q = q.where(WorkOrder.park_id.in_(vis)) if vis else q.where(WorkOrder.id == -1)
     if building_id:
         q = q.where(WorkOrder.building_id == building_id)
+    ent_clause = auth.enterprise_scope_clause(WorkOrder.enterprise_id)
+    if ent_clause is not None:
+        # 工单带 enterprise_id（企业报修单），企业管理员只能看本企业的报修单——
+        # 否则会看到别家企业的报修内容与报修人手机号（实测 589 条中多数不属于本企业）。
+        # 公共区域工单 enterprise_id 为空，不属于任何企业，企业账号不可见。
+        q = q.where(ent_clause)
     if status:
         q = q.where(WorkOrder.status == status)
     if order_type:
@@ -891,6 +897,10 @@ def meeting_bookings(db: DbSession, auth: CurrentAuth, park_id: int | None = Non
         q = q.where(MeetingRoomBooking.park_id == park_id)
     elif vis is not None:
         q = q.where(MeetingRoomBooking.park_id.in_(vis)) if vis else q.where(MeetingRoomBooking.id == -1)
+    # 会议室预定同样是企业维度的数据：企业账号只能看本企业预定的场次
+    ent_clause = auth.enterprise_scope_clause(MeetingRoomBooking.enterprise_id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     rows = list(db.scalars(q.order_by(MeetingRoomBooking.book_date.desc())).all())
     ents = {e.id: e.enterprise_name for e in db.scalars(select(Enterprise)).all()}
     items = [{

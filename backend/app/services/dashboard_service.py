@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import AGE_BUCKET_LABELS, AGE_BUCKETS
 from app.core.security import AuthContext
-from app.services import project_engine, safety_engine
+from app.services import contract_engine, project_engine, safety_engine
 from app.models import (
     Bill,
     Building,
@@ -154,10 +154,11 @@ def get_dashboard_summary(db: Session, auth: AuthContext, park_id: int | None = 
     if building_id:
         c_q = c_q.where(Contract.building_id == building_id)
     contracts = list(db.scalars(c_q).all())
-    active_contracts = [c for c in contracts if c.status in ("ACTIVE", "EXPIRING")]
-    expiring_90 = [c for c in active_contracts
-                   if c.end_date and today <= c.end_date <= today + dt.timedelta(days=90)]
-    expiring_30 = [c for c in expiring_90 if c.end_date <= today + dt.timedelta(days=30)]
+    active_contracts = [c for c in contracts if c.status in contract_engine.EXPIRING_WINDOW_STATUSES]
+    expiring_90 = [c for c in contracts
+                   if contract_engine.is_expiring_on(c.status, c.end_date, today, 90)]
+    expiring_30 = [c for c in contracts
+                   if contract_engine.is_expiring_on(c.status, c.end_date, today, 30)]
 
     # ---------- 收费 ----------
     # 账单是全库最大的表（3.5 万行）。这里需要的全是标量汇总，
@@ -594,8 +595,9 @@ def get_building_detail(db: Session, auth: AuthContext, building_id: int) -> dic
             "vacant_area": round(total_area - rented_area, 2),
             "occupancy_rate": round(rented_area / total_area * 100, 2) if total_area else 0.0,
             "enterprise_count": len(enterprises),
-            "contract_count": len([c for c in contracts if c.status in ("ACTIVE", "EXPIRING")]),
-            "contract_expiring": len([c for c in contracts if c.end_date and today <= c.end_date <= today + dt.timedelta(days=90)]),
+            "contract_count": len([c for c in contracts if c.status in contract_engine.EXPIRING_WINDOW_STATUSES]),
+            "contract_expiring": len([c for c in contracts
+                                      if contract_engine.is_expiring_on(c.status, c.end_date, today, 90)]),
             "work_order_open": len([o for o in work_orders if o.status not in ("CLOSED", "RATED")]),
             "device_count": len(devices),
             "device_fault": len([d for d in devices if d.status == "FAULT"]),

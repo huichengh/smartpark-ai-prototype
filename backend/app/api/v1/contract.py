@@ -19,6 +19,7 @@ from app.models import (
     Space,
 )
 from app.schemas.common import paginate
+from app.services import contract_engine
 
 router = APIRouter(prefix="/contracts", tags=["合同管理"])
 
@@ -26,6 +27,15 @@ STATUS_NAMES = {
     "DRAFT": "草稿", "PENDING": "待审批", "ACTIVE": "生效中",
     "EXPIRING": "即将到期", "EXPIRED": "已到期", "TERMINATED": "已终止",
 }
+
+# ---------------------------------------------------------------------------
+# 合同「即将到期」的口径只有一份实现：见 app/services/contract_engine.py
+# ---------------------------------------------------------------------------
+# 这里曾经自己算过一遍（只看日期不看状态），把 2 份**已终止**合同也算进
+# "90 天内到期"，于是驾驶舱显示 37、合同页显示 39。已终止合同不可能续租，
+# 算进去会凭空多出催办任务。凡是"到期预警"语义一律走 contract_engine。
+EXPIRING_WINDOW_STATUSES = contract_engine.EXPIRING_WINDOW_STATUSES
+is_expiring_within = contract_engine.is_expiring_within
 
 
 @router.get("")
@@ -42,8 +52,9 @@ def list_contracts(db: DbSession, auth: CurrentAuth,
         q = q.where(Contract.park_id == park_id)
     elif vis is not None:
         q = q.where(Contract.park_id.in_(vis)) if vis else q.where(Contract.id == -1)
-    if auth.enterprise_id:
-        q = q.where(Contract.enterprise_id == auth.enterprise_id)
+    ent_clause = auth.enterprise_scope_clause(Contract.enterprise_id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     if building_id:
         q = q.where(Contract.building_id == building_id)
     if status:
@@ -68,9 +79,10 @@ def list_contracts(db: DbSession, auth: CurrentAuth,
     items = []
     for c in contracts:
         days_left = (c.end_date - today).days if c.end_date else None
-        if expiring_days is not None:
-            if days_left is None or days_left < 0 or days_left > expiring_days:
-                continue
+        if expiring_days is not None and not is_expiring_within(c.status, days_left, expiring_days):
+            # 这里的过滤条件必须与 /contracts/expiring 和驾驶舱 KPI 同口径，
+            # 否则同一个"90 天内到期"会出现 37 / 39 两个数（已终止合同不该算进来）。
+            continue
         cb = bill_by_contract.get(c.id, [])
         arrears = round(sum(b.arrears or 0 for b in cb
                             if b.status in ("UNPAID", "PARTIAL", "OVERDUE")), 2)
@@ -106,8 +118,10 @@ def list_contracts(db: DbSession, auth: CurrentAuth,
         "by_status": {k: len([i for i in items if i["status"] == k])
                       for k in STATUS_NAMES if len([i for i in items if i["status"] == k])},
         "active_count": len([i for i in items if i["status"] in ("ACTIVE", "EXPIRING")]),
-        "expiring_90": len([i for i in items if i["days_left"] is not None and 0 <= i["days_left"] <= 90]),
-        "expiring_30": len([i for i in items if i["days_left"] is not None and 0 <= i["days_left"] <= 30]),
+        "expiring_90": len([i for i in items
+                            if is_expiring_within(i["status"], i["days_left"], 90)]),
+        "expiring_30": len([i for i in items
+                            if is_expiring_within(i["status"], i["days_left"], 30)]),
         "expired_open": len([i for i in items if i["days_left"] is not None and i["days_left"] < 0
                              and i["status"] in ("ACTIVE", "EXPIRING")]),
         "total_leased_area": round(sum(i["leased_area"] or 0 for i in items), 2),
@@ -125,7 +139,7 @@ def expiring_contracts(db: DbSession, auth: CurrentAuth,
     auth.require("contract", "VIEW")
     park_id = resolve_park(auth, park_id)
     vis = auth.visible_park_ids()
-    q = select(Contract).where(Contract.status.in_(["ACTIVE", "EXPIRING"]))
+    q = select(Contract).where(Contract.status.in_(EXPIRING_WINDOW_STATUSES))
     if park_id:
         q = q.where(Contract.park_id == park_id)
     elif vis is not None:
@@ -147,7 +161,7 @@ def expiring_contracts(db: DbSession, auth: CurrentAuth,
         if not c.end_date:
             continue
         days_left = (c.end_date - today).days
-        if days_left < 0 or days_left > days:
+        if not is_expiring_within(c.status, days_left, days):
             continue
         rows.append({
             "id": c.id, "contract_code": c.contract_code,
@@ -190,8 +204,7 @@ def contract_detail(contract_id: int, db: DbSession, auth: CurrentAuth) -> dict[
     c = db.get(Contract, contract_id)
     if not c or not auth.can_access_park(c.park_id):
         raise HTTPException(404, "合同不存在或无权访问")
-    if auth.enterprise_id and auth.enterprise_id != c.enterprise_id:
-        raise HTTPException(403, "企业账号只能查看本企业合同")
+    auth.require_enterprise(c.enterprise_id, "企业账号只能查看本企业合同")
     today = dt.date.today()
     bills = list(db.scalars(select(Bill).where(Bill.contract_id == contract_id)
                             .order_by(Bill.bill_date.desc())).all())

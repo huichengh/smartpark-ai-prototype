@@ -24,6 +24,7 @@ from app.models import (
     Space,
 )
 from app.schemas.common import paginate
+from app.services import contract_engine
 
 router = APIRouter(prefix="/enterprise", tags=["企业与政策"])
 
@@ -60,8 +61,9 @@ def list_enterprises(db: DbSession, auth: CurrentAuth,
         q = q.where(Enterprise.park_id == park_id)
     elif vis is not None:
         q = q.where(Enterprise.park_id.in_(vis)) if vis else q.where(Enterprise.id == -1)
-    if auth.enterprise_id:
-        q = q.where(Enterprise.id == auth.enterprise_id)
+    ent_clause = auth.enterprise_scope_clause(Enterprise.id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     if keyword:
         q = q.where(or_(Enterprise.enterprise_name.contains(keyword),
                         Enterprise.unified_social_credit_code.contains(keyword),
@@ -132,8 +134,7 @@ def enterprise_detail(ent_id: int, db: DbSession, auth: CurrentAuth) -> dict[str
     e = db.get(Enterprise, ent_id)
     if not e or not auth.can_access_park(e.park_id):
         raise HTTPException(404, "企业不存在或无权访问")
-    if auth.enterprise_id and auth.enterprise_id != ent_id:
-        raise HTTPException(403, "企业账号只能查看本企业档案")
+    auth.require_enterprise(ent_id, "企业账号只能查看本企业档案")
 
     spaces = list(db.scalars(select(Space).where(Space.enterprise_id == ent_id)).all())
     contracts = list(db.scalars(select(Contract).where(Contract.enterprise_id == ent_id)
@@ -158,8 +159,8 @@ def enterprise_detail(ent_id: int, db: DbSession, auth: CurrentAuth) -> dict[str
     overdue = [b for b in bills if b.status == "OVERDUE"]
     total_receivable = round(sum(b.receivable or 0 for b in bills), 2)
     total_received = round(sum(b.received or 0 for b in bills), 2)
-    expiring = [c for c in contracts if c.end_date and c.status in ("ACTIVE", "EXPIRING")
-                and c.end_date <= today + dt.timedelta(days=90)]
+    expiring = [c for c in contracts
+                if contract_engine.is_expiring_on(c.status, c.end_date, today, 90)]
 
     # 经营风险信号（可解释）
     risk_signals = []
@@ -422,8 +423,9 @@ def list_service_requests(db: DbSession, auth: CurrentAuth,
         q = q.where(ServiceRequest.park_id == park_id)
     elif vis is not None:
         q = q.where(ServiceRequest.park_id.in_(vis)) if vis else q.where(ServiceRequest.id == -1)
-    if auth.enterprise_id:
-        q = q.where(ServiceRequest.enterprise_id == auth.enterprise_id)
+    ent_clause = auth.enterprise_scope_clause(ServiceRequest.enterprise_id)
+    if ent_clause is not None:
+        q = q.where(ent_clause)
     if enterprise_id:
         q = q.where(ServiceRequest.enterprise_id == enterprise_id)
     if status_:

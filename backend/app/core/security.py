@@ -203,6 +203,38 @@ class AuthContext:
     def enterprise_id(self) -> int | None:
         return self.user.enterprise_id
 
+    def visible_enterprise_ids(self) -> list[int] | None:
+        """None = 不受企业级限制；[] = 无可见企业。
+
+        **失败方向必须朝"少给"**：企业管理员（ENTERPRISE 范围）如果没有绑定归属企业，
+        说明数据范围算不出来，此时返回空列表（什么都看不到），而不是 None（看到全部）。
+        早期播种漏写 `users.enterprise_id`，各接口的 `if auth.enterprise_id:` 守卫就
+        整体静默失效，企业管理员实际能看到全园区 128 家企业、1.3 万条账单——
+        **静默越权比报错危险得多，报错至少会被发现。**
+        """
+        if self.data_scope in ("GROUP", "PARK", "DEPARTMENT", "PROJECT"):
+            return None
+        if self.user.enterprise_id:
+            return [self.user.enterprise_id]
+        return []
+
+    def can_access_enterprise(self, ent_id: int | None) -> bool:
+        vis = self.visible_enterprise_ids()
+        if vis is None:
+            return True
+        return ent_id is not None and ent_id in vis
+
+    def enterprise_scope_clause(self, column):
+        """企业级过滤条件；返回 None 表示不加限制。"""
+        vis = self.visible_enterprise_ids()
+        if vis is None:
+            return None
+        return column.in_(vis) if vis else column == -1
+
+    def require_enterprise(self, ent_id: int | None, message: str = "企业账号只能访问本企业数据") -> None:
+        if not self.can_access_enterprise(ent_id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
+
     # ---- 数据权限 ----
     def visible_park_ids(self) -> list[int] | None:
         """None 表示全部园区可见（集团级）。"""

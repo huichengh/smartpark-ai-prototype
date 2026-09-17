@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import random
 
-from sqlalchemy import delete, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import Base, SessionLocal, engine
@@ -66,24 +66,41 @@ def mon_back(n: int) -> dt.date:
 # ==========================================================================
 # 0. 清空
 # ==========================================================================
-ALL_MODELS = [
-    SprintTask, UserStory, Feature, Epic, Sprint, TaskDependency, WbsItem,
-    ProjectPhase, ProjectChange, ProjectIssue, ProjectRisk, ProjectCost,
-    Milestone, DeviceInspection, Device, EnergyRecord, SafetyHazard,
-    SafetyIncident, WorkOrder, ServiceRequest, MeetingRoomBooking, Activity,
-    AccessRecord, Visitor, Vehicle, ParkingSpace, Payment, Bill, Contract,
-    LeasingFollowup, LeasingLead, LeasingActivity, Channel, EnterpriseTag,
-    EnterpriseContact, Enterprise, Policy, AIConversation, AIMessage,
-    AIRecommendation, ApprovalStep, ApprovalRequest, Notification, AuditLog,
-    ReportRecord, RolePermission, UserRole, UserParkScope, User, Space, Floor,
-    Building, Park, ParkTemplate, Permission, Role, Organization, Project,
-]
+# 删除顺序由 ORM 元数据自动推导（见 clear_all），这里不再维护表清单：
+# 手写清单漏了 7 张表，导致 --seed 在已有库上必崩。
 
 
 def clear_all(db: Session) -> None:
-    for model in ALL_MODELS:
-        db.execute(delete(model))
-    db.flush()
+    """清空全部业务表（重建演示数据前调用）。
+
+    两个坑，都踩过：
+
+    1. **删除顺序不能手工维护**。这里曾经是一份手写的 `ALL_MODELS` 列表，库里有 65 张表、
+       列表里只有 58 张，漏掉的 7 张（`policy_matches`、`contract_payments`、`project_tasks`、
+       `user_project_scopes`、`data_quality_*`、`data_uploads`）残留行通过外键挡住父表删除，
+       于是 `python run.py --seed` 在**已有库上必然崩溃**，而全新库因为无行可删反而正常——
+       这个缺陷在第一次播种时根本看不出来。
+
+    2. **光靠 ORM 拓扑排序也不够**：`contracts` 与 `spaces` 互相引用（循环外键），
+       SQLAlchemy 会给出 `Cannot correctly sort tables` 警告，排序结果不可靠，
+       照它删依然会撞外键。
+
+    所以整库重置阶段直接**临时关闭外键校验**（SQLite 的标准做法）：先把所有表清空，
+    再立刻恢复。注意 `PRAGMA foreign_keys` 在事务内切换无效，必须先 commit 结束事务。
+    """
+    db.commit()  # 先结束隐式事务，否则 PRAGMA 在事务内切换无效
+    # 关键：PRAGMA foreign_keys 是**按连接**生效的，所以必须拿会话正在用的那条
+    # 底层连接来执行，并且在整个清空过程中持有它（中途 commit 会让连接代理失效）。
+    raw = db.connection().connection.dbapi_connection
+    raw.execute("PRAGMA foreign_keys=OFF")
+    try:
+        for table in Base.metadata.sorted_tables:
+            raw.execute(f'DELETE FROM "{table.name}"')
+        raw.commit()
+    finally:
+        raw.execute("PRAGMA foreign_keys=ON")  # 运行期约束必须恢复
+        raw.commit()
+    db.commit()
 
 
 # ==========================================================================
@@ -2241,6 +2258,37 @@ USER_DEFS = [
 ]
 
 
+def seed_enterprise_bindings(db: Session, users: list, enterprises: list) -> int:
+    """把 ENTERPRISE 数据范围的账号绑定到其所属企业。
+
+    为什么必须有这一步：企业管理员的数据范围就是"本企业"，`users.enterprise_id`
+    是唯一的归属依据。早期播种漏了它，于是企业管理员虽然角色是 ENTERPRISE 范围，
+    系统却算不出"自己是谁家的"，范围过滤退化成园区级——实测能看到全园区
+    128 家企业、1.3 万条账单。**没有归属主体的数据范围等于没有范围。**
+
+    绑定规则：取该账号所在园区下企业编号最小的那家（确定性，便于复现）。
+    """
+    by_username = {u.username: u for u in users}
+    first_of_park: dict[int, object] = {}
+    for e in sorted(enterprises, key=lambda x: x.id):
+        first_of_park.setdefault(e.park_id, e)
+
+    bound = 0
+    for username, _name, _rk, _dept, _title, scope, _pidx in USER_DEFS:
+        if scope != "ENTERPRISE":
+            continue
+        u = by_username.get(username)
+        if u is None or u.enterprise_id:
+            continue
+        ent = first_of_park.get(u.park_id)
+        if ent is None:
+            continue
+        u.enterprise_id = ent.id
+        bound += 1
+    db.flush()
+    return bound
+
+
 def seed_users(db: Session, parks: list, roles: dict) -> tuple:
     users, users_by_park = [], {p.id: [] for p in parks}
     for username, name, role_key, dept, title, scope, pidx in USER_DEFS:
@@ -2685,7 +2733,8 @@ def main() -> None:
         enterprises = seed_enterprises(db, parks)
         assign_spaces(db, parks, enterprises, park_spaces)
         seed_enterprise_contacts_tags(db, enterprises)
-        print(f"[5/12] 企业与空间分配      企业 {len(enterprises)}")
+        bound = seed_enterprise_bindings(db, users, enterprises)
+        print(f"[5/12] 企业与空间分配      企业 {len(enterprises)}，企业账号绑定 {bound}")
 
         channels, _ = seed_channels_activities(db, parks)
         leads = seed_leads(db, parks, channels, users_by_park)

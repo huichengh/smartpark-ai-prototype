@@ -129,8 +129,12 @@ export default function Contracts() {
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
           <KpiCard label="合同总数" value={stats.total ?? 0} unit="份" />
           <KpiCard label="生效中" value={stats.active_count ?? 0} unit="份" tone="ok" />
-          <KpiCard label="90 天内到期" value={stats.expiring_90 ?? 0} unit="份" tone="warn" />
-          <KpiCard label="30 天内到期" value={stats.expiring_30 ?? 0} unit="份" tone="risk" />
+          {/* 口径必须写在指标上：这个数曾因"已终止合同也被算入"而从 39 变 37，
+              不给口径说明的话，使用者只会认为数据出错了。 */}
+          <KpiCard label="90 天内到期" value={stats.expiring_90 ?? 0} unit="份" tone="warn"
+                   hint="仅统计生效中/即将到期合同，已终止不计入" />
+          <KpiCard label="30 天内到期" value={stats.expiring_30 ?? 0} unit="份" tone="risk"
+                   hint="仅统计生效中/即将到期合同，已终止不计入" />
           <KpiCard label="在租面积" value={fmt(stats.total_leased_area, 0)} unit="㎡" />
           <KpiCard label="月租金合计" value={wan(stats.total_monthly_rent)} unit="元" tone="ai" />
         </div>
