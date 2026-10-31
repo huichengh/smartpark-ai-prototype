@@ -425,3 +425,25 @@ export const systemApi = {
 
 export { ApiException } from './client'
 export type { ApiError }
+
+// ================================================================ 经营决策
+// 与 backend/app/api/v1/operating.py 的 8 个端点一一对应。
+// 注意：沙盘返回值全部由后端确定性函数算出，前端不做任何金额运算。
+export const operatingApi = {
+  metrics: (params: Record<string, any> = {}) => api.get<any>('/operating/metrics', params),
+  spaces: (params: Record<string, any> = {}) =>
+    api.get<PageResult<any>>('/operating/spaces', params),
+  compare: (body: Record<string, any>) => api.post<any>('/operating/scenarios/compare', body),
+  saveScenario: (body: Record<string, any>) => api.post<any>('/operating/scenarios', body),
+  scenarios: (params: Record<string, any> = {}) =>
+    api.get<PageResult<any>>('/operating/scenarios', params),
+  renewalRisks: (params: Record<string, any> = {}) =>
+    api.get<any>('/operating/renewal-risks', params),
+  reviewRisk: (contractId: number, decision: 'CONFIRMED' | 'DISMISSED', reason?: string) =>
+    api.post<any>(`/operating/renewal-risks/${contractId}/review`, { decision, reason }),
+  actions: (params: Record<string, any> = {}) =>
+    api.get<PageResult<any>>('/operating/actions', params),
+  createAction: (body: Record<string, any>) => api.post<any>('/operating/actions', body),
+  transition: (id: number, to_status: string, note?: string, result_note?: string) =>
+    api.post<any>(`/operating/actions/${id}/transition`, { to_status, note, result_note }),
+}

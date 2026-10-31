@@ -18,6 +18,7 @@ from app.api.v1 import (
     finance,
     leasing,
     notification,
+    operating,
     operation,
     project,
     report,
@@ -39,6 +40,7 @@ api_router.include_router(contract.router)
 api_router.include_router(finance.router)
 api_router.include_router(project.router)
 api_router.include_router(operation.router)
+api_router.include_router(operating.router)
 api_router.include_router(approval.router)
 api_router.include_router(agent.router)
 api_router.include_router(data.router)

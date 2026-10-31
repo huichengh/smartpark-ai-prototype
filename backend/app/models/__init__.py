@@ -1567,3 +1567,92 @@ class AuditLog(Base):
     user_agent: Mapped[str | None] = mapped_column(String(200))
     result: Mapped[str] = mapped_column(String(20), default="SUCCESS")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+# ==========================================================================
+# 二十三、经营决策（招商沙盘 / 续租风险复核 / 建议执行任务）
+# ==========================================================================
+# 这三张表是"经营闭环"的落点：沙盘存方案与口径快照，风险复核存人工纠错，
+# 任务表存 DRAFT→…→CLOSED 的状态机与完整时间线。
+# 三者都带 is_demo，沿用"演示数据必须显式标识"的约定。
+
+
+class OperatingScenario(Base, TimestampMixin):
+    """经营沙盘方案：保存的是**输入参数 + 当时的测算结果**。
+
+    为什么结果也要存：口径或参数版本变了以后，历史方案必须还能复原成当时的样子，
+    否则过两周再看这条方案，数字对不上就没有任何解释力。
+    """
+
+    __tablename__ = "operating_scenarios"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scenario_code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(150))
+    park_id: Mapped[int | None] = mapped_column(ForeignKey("parks.id"), index=True)
+    space_id: Mapped[int | None] = mapped_column(ForeignKey("spaces.id"))
+    space_name: Mapped[str | None] = mapped_column(String(150))
+    params: Mapped[dict | None] = mapped_column(JSON)      # 三方案输入参数
+    result: Mapped[dict | None] = mapped_column(JSON)      # 测算结果（含假设与口径版本）
+    assumption_version: Mapped[str] = mapped_column(String(20), default="v1.0")
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_by_name: Mapped[str | None] = mapped_column(String(50))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=True)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+
+class OperatingRiskReview(Base, TimestampMixin):
+    """续租风险的人工复核记录（确认 / 解除误报 / 备注）。
+
+    规则必然有误报，所以"人能否纠正"是这套机制能不能用的关键。
+    每一次复核都保留当时的风险快照，事后可追溯"当初为什么这么判"。
+    """
+
+    __tablename__ = "operating_risk_reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("contracts.id"), index=True)
+    enterprise_id: Mapped[int | None] = mapped_column(ForeignKey("enterprises.id"))
+    level: Mapped[str] = mapped_column(String(20))            # HIGH / MEDIUM / LOW / UNKNOWN
+    decision: Mapped[str] = mapped_column(String(20))         # CONFIRMED / DISMISSED
+    reason: Mapped[str | None] = mapped_column(Text)
+    snapshot: Mapped[dict | None] = mapped_column(JSON)       # 复核时的风险全量快照
+    decided_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    decided_by_name: Mapped[str | None] = mapped_column(String(50))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class OperatingAction(Base, TimestampMixin):
+    """建议执行任务：建议单 → 人工确认 → 分派 → 执行 → 验收 → 关闭。
+
+    状态机约束在应用层校验（见 api/v1/operating.py 的 TRANSITIONS）。
+    `timeline` 保存每次状态变化的 who/when/why，满足"可回放"的要求。
+    """
+
+    __tablename__ = "operating_actions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action_code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    source_type: Mapped[str] = mapped_column(String(30), index=True)   # RENEWAL_RISK / SCENARIO / MANUAL
+    source_id: Mapped[int | None] = mapped_column(Integer)
+    task_template: Mapped[str | None] = mapped_column(String(30))      # PROPERTY_FIX / LEASING_FOLLOWUP / ENTERPRISE_VISIT
+    park_id: Mapped[int | None] = mapped_column(ForeignKey("parks.id"), index=True)
+    enterprise_id: Mapped[int | None] = mapped_column(ForeignKey("enterprises.id"))
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("contracts.id"))
+    status: Mapped[str] = mapped_column(String(20), default="DRAFT", index=True)
+    priority: Mapped[str] = mapped_column(String(10), default="MEDIUM")
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    owner_name: Mapped[str | None] = mapped_column(String(50))
+    owner_role: Mapped[str | None] = mapped_column(String(50))
+    due_date: Mapped[dt.date | None] = mapped_column(Date)
+    sla_hours: Mapped[int | None] = mapped_column(Integer)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    created_by_name: Mapped[str | None] = mapped_column(String(50))
+    approved_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    approved_by_name: Mapped[str | None] = mapped_column(String(50))
+    approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    result_note: Mapped[str | None] = mapped_column(Text)
+    timeline: Mapped[list | None] = mapped_column(JSON)
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=True)

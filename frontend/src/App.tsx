@@ -18,6 +18,7 @@ import Space from '@/pages/Space'
 import Leasing from '@/pages/Leasing'
 import Enterprise from '@/pages/Enterprise'
 import Contracts from '@/pages/Contracts'
+import Operating from '@/pages/Operating'
 import Finance from '@/pages/Finance'
 import Projects from '@/pages/Projects'
 import ProjectDetail from '@/pages/ProjectDetail'
@@ -117,6 +118,14 @@ export default function App() {
             element={
               <RequirePerm module="enterprise">
                 <Enterprise />
+              </RequirePerm>
+            }
+          />
+          <Route
+            path="/operating"
+            element={
+              <RequirePerm module="operating">
+                <Operating />
               </RequirePerm>
             }
           />

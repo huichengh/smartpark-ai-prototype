@@ -216,7 +216,7 @@ MODULES_FOR_PERM = [
     ("policy", "政策服务"), ("finance", "财务收费"), ("parking", "停车与通行"),
     ("ai", "AI园区助手"), ("data", "数据中心"), ("approval", "审批中心"),
     ("report", "报表中心"), ("notification", "消息预警"), ("system", "系统管理"),
-    ("audit", "日志审计"),
+    ("audit", "日志审计"), ("operating", "经营决策"),
 ]
 
 ACTIONS = [("VIEW", "查看"), ("ADD", "新增"), ("EDIT", "编辑"), ("DELETE", "删除"),
@@ -236,12 +236,12 @@ ROLE_PERM_MATRIX = {
         "service": ["VIEW", "ADD", "EDIT"], "policy": ["VIEW", "AI"], "finance": ["VIEW", "APPROVE", "EXPORT"],
         "parking": ["VIEW", "EDIT"], "ai": ["VIEW", "AI"], "data": ["VIEW", "IMPORT", "EXPORT"],
         "approval": ["VIEW", "APPROVE"], "report": ["VIEW", "EXPORT"], "notification": ["VIEW"],
-        "audit": ["VIEW"],
+        "audit": ["VIEW"], "operating": ["VIEW", "ADD", "EDIT", "APPROVE", "AI", "EXPORT"],
     },
     "LEASING_MANAGER": {
         "dashboard": ["VIEW", "AI"], "enterprise": ["VIEW", "ADD", "EDIT", "AI"],
         "space": ["VIEW"], "leasing": ["VIEW", "ADD", "EDIT", "DELETE", "IMPORT", "EXPORT", "APPROVE", "AI"],
-        "contract": ["VIEW", "ADD", "EDIT"], "ai": ["VIEW", "AI"], "report": ["VIEW", "EXPORT"],
+        "contract": ["VIEW", "ADD", "EDIT"], "operating": ["VIEW", "ADD", "EDIT", "APPROVE", "AI"], "ai": ["VIEW", "AI"], "report": ["VIEW", "EXPORT"],
         "notification": ["VIEW"], "data": ["VIEW", "IMPORT", "EXPORT"], "approval": ["VIEW"],
     },
     "LEASING_STAFF": {

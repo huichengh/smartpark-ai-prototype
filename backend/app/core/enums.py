@@ -289,6 +289,7 @@ MODULE_LABELS: dict[str, str] = {
     "auth": "登录认证", "agent": "AI 智能体",
     # 审计日志里 property 与 operation 并存（历史写入路径不同），统一到「物业运维」
     "property": "物业运维",
+    "operating": "经营决策",
 }
 
 ACTION_LABELS: dict[str, str] = {

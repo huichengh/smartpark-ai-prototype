@@ -12,6 +12,7 @@ import {
   Building2,
   Handshake,
   FileSignature,
+  TrendingUp,
   Wallet,
   FolderKanban,
   Wrench,
@@ -85,6 +86,14 @@ export const NAV_ITEMS: NavItem[] = [
     group: '资产与招商',
     perm: ['enterprise', 'VIEW'],
     desc: '企业档案、政策匹配与服务诉求',
+  },
+  {
+    path: '/operating',
+    label: '经营决策工作台',
+    icon: TrendingUp,
+    group: '资产与招商',
+    perm: ['operating', 'VIEW'],
+    desc: '招商方案推演、续租风险与任务闭环',
   },
   {
     path: '/contracts',
