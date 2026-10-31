@@ -160,6 +160,9 @@ cd frontend && npm run dev       # → http://127.0.0.1:5173（已配 /api 代�
 - **决策必须由人做**：沙盘只给方案与差额，不下结论；任务状态机 `DRAFT→待审批→已批准→执行中→待验收→已关闭`，
   越级迁移被拒，**审批人不能是创建人**。
 - **缺失即缺失**：指标算不出来返回 `null + unavailable_reason`，不填 0。
+- **AI 会算也会说清来路**：新增第 12 个子智能体「经营优化AI」，问「某空置楼层怎样出租收益更高」
+  会真调引擎计算（不是生成数字），并在回答里附 `source_ids / model_version / assumptions /
+  data_quality / requires_approval`，任何结论都能回答"这个数从哪来、要不要人签字"。
 
 详见 [`docs/经营决策模块说明.md`](docs/经营决策模块说明.md)；金标准用例 `backend/check_operating.py`（33 条）。
 

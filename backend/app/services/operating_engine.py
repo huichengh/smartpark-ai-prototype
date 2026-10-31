@@ -52,6 +52,7 @@ class LeaseScenario:
     payment_cycle_days: int = 30      # 回款周期（天）
     label: str = ""
     key: str = ""
+    user_discount: float | None = None   # 使用者显式指定的让价（覆盖 B 的预设）
 
     def validate(self) -> None:
         if self.area is None or self.area <= 0:
@@ -96,6 +97,7 @@ class ScenarioResult:
     service_cost_total: float
     vacancy_loss: float
     net_contribution: float
+    net_after_vacancy: float
     payback_month: int | None
     first_cash_month: int | None = None
     cash_flow: list[dict[str, Any]] = field(default_factory=list)
@@ -114,6 +116,7 @@ class ScenarioResult:
             "service_cost_total": round(self.service_cost_total, 2),
             "vacancy_loss": round(self.vacancy_loss, 2),
             "net_contribution": round(self.net_contribution, 2),
+            "net_after_vacancy": round(self.net_after_vacancy, 2),
             "payback_month": self.payback_month,
             "first_cash_month": self.first_cash_month,
             "cash_flow": self.cash_flow,
@@ -200,7 +203,11 @@ def evaluate(s: LeaseScenario) -> ScenarioResult:
         gross_rent_total=gross_rent_total, rent_free_value=rent_free_value,
         commission=commission, fitout_cost=fitout_cost,
         service_cost_total=service_cost_total, vacancy_loss=vacancy_loss,
-        net_contribution=net_contribution, payback_month=payback_month,
+        net_contribution=net_contribution,
+        # 决策口径：把空置期的机会成本也扣掉。租期净贡献不含空置，
+        # 否则"等一年"与"等三个月"会算出同一个数，回答就跟问题无关了。
+        net_after_vacancy=net_contribution - vacancy_loss,
+        payback_month=payback_month,
         first_cash_month=first_cash_month,
         cash_flow=cash_flow, assumptions=_assumptions(s),
     )
@@ -262,12 +269,17 @@ def build_presets(base: LeaseScenario) -> list[LeaseScenario]:
     """以当前空间参数为底，生成 A/B/C 三套可比较方案。"""
     out: list[LeaseScenario] = []
     for key, p in SCENARIO_PRESETS.items():
-        vacancy = max(0, base.vacancy_days + int(p["vacancy_days_delta"]))
+        raw = base.vacancy_days + int(p["vacancy_days_delta"])
+        # 基准空置期本身可能接近上限（例如用户问"空置要等一年"），加上方案偏移后会越界。
+        # 这里**封顶并标注**，而不是让它把整个推演打回"数据不足"——用户问的是正常的假设情景。
+        vacancy = max(0, min(365, raw))
         out.append(LeaseScenario(
             area=base.area,
             list_rent=base.list_rent * (1.15 if key == "C" else 1.0),  # 分割改造后单位租金按 +15% 假设
             lease_months=base.lease_months,
-            discount=float(p["discount"]),
+            # 使用者显式指定让价时，用他的值替换预设（B 是让价方案）；否则沿用预设。
+            discount=(base.user_discount if (key == "B" and base.user_discount is not None)
+                      else float(p["discount"])),
             rent_free_months=int(p["rent_free_months"]),
             vacancy_days=vacancy,
             commission_months=base.commission_months,
@@ -287,9 +299,13 @@ def compare(base: LeaseScenario) -> dict[str, Any]:
 
     rows = []
     for s, r in zip(scenarios, results):
+        raw_vacancy = base.vacancy_days + int(SCENARIO_PRESETS[s.key]["vacancy_days_delta"])
+        note = SCENARIO_PRESETS[s.key]["note"]
+        if raw_vacancy > 365:
+            note += f"；空置期 {raw_vacancy} 天超出可推演上限，已按 365 天封顶"
         rows.append({
             **r.to_dict(),
-            "preset_note": SCENARIO_PRESETS[s.key]["note"],
+            "preset_note": note,
             "delta_vs_a": round(r.net_contribution - base_net, 2),
             "vacancy_days": s.vacancy_days,
             "vacancy_months": -(-s.vacancy_days // DAYS_PER_MONTH),
@@ -298,12 +314,14 @@ def compare(base: LeaseScenario) -> dict[str, Any]:
             "fitout_per_sqm": s.fitout_per_sqm,
         })
 
-    best = max(rows, key=lambda x: x["net_contribution"])
-    fastest = min(rows, key=lambda x: (x["vacancy_days"], -x["net_contribution"]))
+    for r in rows:
+        r["delta_decision_vs_a"] = round(r["net_after_vacancy"] - rows[0]["net_after_vacancy"], 2)
+    best = max(rows, key=lambda x: x["net_after_vacancy"])
+    fastest = min(rows, key=lambda x: (x["vacancy_days"], -x["net_after_vacancy"]))
 
     # 解读只陈述可验证的差异，不下"应当选哪个"的结论——决策由人做（L3）。
     notes = [
-        f"净经营贡献最高：{best['label']}（{best['net_contribution']:,.0f} 元）",
+        f"扣空置机会成本后净贡献最高：{best['label']}（{best['net_after_vacancy']:,.0f} 元）",
         f"起租最快：{fastest['label']}（预计空置 {fastest['vacancy_days']} 天）",
         "方案 C 的单位租金上调与改造投入均为参数假设，需工程可行性确认后才可执行。",
     ]

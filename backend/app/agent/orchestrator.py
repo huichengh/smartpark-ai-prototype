@@ -47,7 +47,9 @@ SUB_AGENTS: dict[str, dict[str, Any]] = {
         "description": "企业全生命周期画像、风险识别、成长趋势、续租与扩租机会",
         "tools": ["get_enterprise_profile", "get_contract_expiry", "get_financial_summary",
                   "get_policy_matches"],
-        "keywords": ["企业", "公司", "画像", "档案", "风险企业", "成长", "续租", "扩租", "退园",
+        # 「续租」不放在这里：续租风险评估归经营优化AI（规则+证据），
+        # 放在企业画像里会把「某企业续租有何风险」抢到企业档案去。
+        "keywords": ["企业", "公司", "画像", "档案", "风险企业", "成长", "扩租", "退园",
                      "工商", "注册资本", "高企", "专精特新"],
     },
     "space": {
@@ -114,6 +116,18 @@ SUB_AGENTS: dict[str, dict[str, Any]] = {
                      "发票", "租金", "物业费", "收入", "账龄", "退款", "减免", "回款",
                      "收缴", "收缴率", "到账"],
     },
+    "operating": {
+        "key": "operating", "name": "经营优化AI", "icon": "trending-up",
+        "description": "空置空间招商方案推演、续租风险识别与处置建议（确定性计算，非估算）",
+        "tools": ["compare_leasing_scenarios", "list_renewal_risks",
+                  "get_contract_expiry", "get_space_status", "create_ai_recommendation"],
+        # 短语（如「续租风险」）比单词得分高，用来压过「企业」这类泛化名词：
+        # 「某企业续租有何风险」应进经营优化，而不是去查企业档案。
+        "keywords": ["空置", "出租", "让价", "降租", "涨价", "租金定价", "方案", "推演",
+                     "沙盘", "回本", "净收益", "净贡献", "续租", "续约", "退租", "流失",
+                     "搬走", "迁出", "挽留", "招商方案", "收益方案", "敏感性",
+                     "续租风险", "退租风险", "续约风险", "挽留方案"],
+    },
     "operations": {
         "key": "operations", "name": "经营分析AI", "icon": "bar-chart-3",
         "description": "跨模块经营分析、KPI 诊断、综合月报、管理建议",
@@ -160,7 +174,7 @@ MILD_WEIGHT = 0.6
 
 # 同分时的稳定排序（越靠前越"专"），避免依赖 dict 插入顺序引发隐性误判
 TIE_ORDER: tuple[str, ...] = (
-    "leasing", "project", "energy", "safety", "finance", "contract",
+    "leasing", "project", "operating", "energy", "safety", "finance", "contract",
     "space", "policy", "property", "enterprise", "operations",
 )
 
@@ -1375,6 +1389,219 @@ def _run_operations(db: Session, auth: AuthContext, q: str, park_id: int | None)
     }
 
 
+# --------------------------------------------------------------------------
+# 经营优化AI：从"问答"到"可计算 + 可执行"
+# --------------------------------------------------------------------------
+# 这个 Agent 与其它 Agent 的关键差别：**它给的不是描述，而是可复现的计算结果**。
+# 数字全部来自 operating_engine 的确定性函数（工具层调用），模型只负责解释。
+# 因此输出里必须带上 source_ids / model_version / assumptions / data_quality /
+# requires_approval 五项，让前端和答辩都能追溯"这个数是怎么来的"。
+
+
+# --------------------------------------------------------------------------
+# 从问句里解析经营参数（只解析**明确说了的**，其余仍用台账/假设）
+# --------------------------------------------------------------------------
+# 为什么必须解析：用户问"如果空置要等一年，让价还划算吗"，若仍按默认 90 天作答，
+# 答案与问题就对不上了——这是最容易被现场追问穿的地方。解析不到就用假设，并说明来源。
+_CN_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _num(token: str) -> int | None:
+    if token.isdigit():
+        return int(token)
+    if token in _CN_DIGITS:
+        return _CN_DIGITS[token]
+    if len(token) == 2 and token[0] == "十" and token[1] in _CN_DIGITS:
+        return 10 + _CN_DIGITS[token[1]]
+    return None
+
+
+def _parse_operating_params(q: str) -> dict[str, Any]:
+    """解析空置期 / 让价 / 租期。返回 {'params': {...}, 'notes': [...]}。"""
+    params: dict[str, Any] = {}
+    notes: list[str] = []
+
+    if "半年" in q:
+        params["vacancy_days"] = 180
+        notes.append("空置期按「半年」= 180 天")
+    elif "一年" in q or "1年" in q:
+        params["vacancy_days"] = 365
+        notes.append("空置期按「一年」= 365 天")
+    else:
+        m = re.search(r"(?:空置|等|闲置|拖)[^0-9一二两三四五六七八九十]{0,8}"
+                      r"([0-9]+|[一二两三四五六七八九十]{1,2})\s*(年|个月|月|天)", q)
+        if m:
+            n = _num(m.group(1))
+            unit = m.group(2)
+            if n:
+                days = n * 365 if unit == "年" else (n * 30 if unit in ("个月", "月") else n)
+                if days <= 365:
+                    params["vacancy_days"] = days
+                    notes.append(f"空置期按问题中的「{m.group(1)}{unit}」= {days} 天")
+
+    m = re.search(r"(?:让价|降价|降租|优惠)\s*([0-9]+(?:\.[0-9]+)?)\s*%", q)
+    if m:
+        v = round(float(m.group(1)) / 100, 4)
+        if 0 < v <= 0.5:
+            params["discount"] = v
+            notes.append(f"让价按问题中的「{m.group(1)}%」")
+
+    m = re.search(r"租期\s*([0-9]+|[一二两三四五六七八九十]{1,2})\s*年", q)
+    if m:
+        n = _num(m.group(1))
+        if n and 1 <= n <= 20:
+            params["lease_months"] = n * 12
+            notes.append(f"租期按问题中的「{m.group(1)} 年」= {n * 12} 个月")
+
+    return {"params": params, "notes": notes}
+
+
+def _operating_plan(db: Session, auth: AuthContext, park_id: int | None,
+                    question: str = "") -> dict[str, Any]:
+    parsed = _parse_operating_params(question or "")
+    kw = dict(parsed["params"])
+    r = T.call_tool("compare_leasing_scenarios", db, auth, park_id=park_id, **kw)
+    if not r.get("data"):
+        reasons = r.get("missing_data") or ["空置空间数据"]
+        is_param = any("参数不合法" in str(x) for x in reasons)
+        head = "参数超出可推演范围，未做测算。" if is_param else "当前数据不足以做招商方案推演。"
+        advice = ("请调整空置期 / 让价 / 租期后重试；系统对越界参数一律拒算，不返回兜底数字。"
+                  if is_param else
+                  "请先确认存在可出租空间并录入面积与挂牌价，或指定具体空间后再推演。")
+        return {"response": _block(head, [], [], [advice], "招商决策", reasons,
+                                   ["招商主管", "运营人员"], DecisionStatus.INFO, False, reasons),
+                "evidence": r.get("evidence")}
+
+    d = r["data"]
+    rows = d["scenarios"]
+    a, b, c = rows[0], rows[1], rows[2]
+    key_data = [
+        _kv("推演对象", d.get("space_name") or "指定参数"),
+        _kv("方案A 净贡献", round(a["net_after_vacancy"]), "元",
+            f"已扣空置成本 {a['vacancy_loss']:,.0f} 元"),
+        _kv("方案B 净贡献", round(b["net_after_vacancy"]), "元",
+            f"已扣空置成本 {b['vacancy_loss']:,.0f} 元，较A {b['delta_decision_vs_a']:+,.0f} 元"),
+        _kv("方案C 净贡献", round(c["net_after_vacancy"]), "元",
+            f"已扣空置成本 {c['vacancy_loss']:,.0f} 元，较A {c['delta_decision_vs_a']:+,.0f} 元"),
+        _kv("首次回款", f"A {a['first_cash_month']} / B {b['first_cash_month']} / C {c['first_cash_month']}", "月"),
+        _kv("现金流回正", f"A {a['payback_month']} / B {b['payback_month']} / C {c['payback_month']}", "月"),
+        _kv("空置期假设", f"A {a['vacancy_days']} / B {b['vacancy_days']} / C {c['vacancy_days']}", "天"),
+    ]
+
+    best = max(rows, key=lambda x: x["net_after_vacancy"])
+    reasons = [
+        f"三个方案的差异主要来自两处：实收单价（A {a['effective_rent']:.2f}、B {b['effective_rent']:.2f}、"
+        f"C {c['effective_rent']:.2f} 元/㎡/月）与空置期长短。",
+        f"净经营贡献最高的是「{best['label']}」，比方案 A 高 {best['delta_vs_a']:+,.0f} 元；"
+        f"但它同时要求空置 {best['vacancy_days']} 天，现金流回正在第 {best['payback_month']} 个月。",
+        "让价能缩短空置，但按当前假设测算，让价幅度（10%）换来的空置期缩短（45 天）不足以覆盖租金损失，"
+        "因此 B 的净贡献低于 A。这一结论依赖空置期假设，若实际空置远超 90 天，排序可能反转。",
+    ]
+    suggestions = [
+        "由经营负责人确认选择哪个方案后进入审批流；系统不会自动修改挂牌价或合同。",
+        "若倾向方案 B，建议先与招商确认「让价 10% 能否把空置压到 45 天以内」，否则让价没有经济性。",
+        "方案 C 依赖改造投入（300 元/㎡）与 +15% 单位租金假设，需工程与设计先确认可行性再决策。",
+    ]
+    risks = [
+        "价格为输入参数假设，非市场真实报价；空置天数为人工假设，实际偏长会直接侵蚀净贡献。",
+        "本推演不含税费、空置期物业能耗与折旧，不能直接作为利润口径使用。",
+    ]
+    if best["key"] == "A":
+        conclusion = (f"按当前参数测算，扣掉空置期机会成本后「{best['label']}」最优"
+                      f"（{best['net_after_vacancy']:,.0f} 元）；让价与改造方案均未跑赢"
+                      f"（B {b['delta_decision_vs_a']:+,.0f} 元、C {c['delta_decision_vs_a']:+,.0f} 元）。"
+                      f"选择权在经营负责人，系统只提供可复现的测算依据。")
+    else:
+        conclusion = (f"按当前参数测算，扣掉空置期机会成本后「{best['label']}」最优"
+                      f"（{best['net_after_vacancy']:,.0f} 元），"
+                      f"较维持原价 {best['delta_decision_vs_a']:+,.0f} 元；"
+                      f"选择权在经营负责人，系统只提供可复现的测算依据。")
+
+    if parsed["notes"]:
+        key_data.append(_kv("按问题参数", "；".join(parsed["notes"]), "",
+                            "以下测算已使用这些参数，未使用台账默认值"))
+    return {
+        "response": _block(conclusion, key_data, reasons, suggestions,
+                           f"覆盖空间 {d.get('space_name') or '指定参数'} 的三套方案",
+                           risks, ["经营负责人", "招商主管", "财务人员"],
+                           DecisionStatus.NEED_CONFIRM, True, []),
+        "evidence": r.get("evidence"),
+        "source_ids": {"space_id": d.get("space_id")},
+        "model_version": f"operating-engine-{d['assumptions']['version']}",
+        "assumptions": d["assumptions"],
+        "data_quality": {"space_name": d.get("space_name"), "scenarios": len(rows)},
+        "requires_approval": True,
+    }
+
+
+def _operating_risk(db: Session, auth: AuthContext, park_id: int | None) -> dict[str, Any]:
+    r = T.call_tool("list_renewal_risks", db, auth, park_id=park_id)
+    if not r.get("data"):
+        return {"response": _block(
+            "当前没有处于到期窗口内的合同，无法生成续租风险清单。", [], [], [],
+            "企业续租", r.get("missing_data", ["到期合同"]), ["运营人员", "招商主管"],
+            DecisionStatus.INFO, False, r.get("missing_data")), "evidence": r.get("evidence")}
+
+    d = r["data"]
+    items = d["items"]
+    by_level = d.get("by_level") or {}
+    top = items[0]
+    key_data = [
+        _kv("到期窗口内合同", d["total"], "份", f"未来 {d['window_days']} 天"),
+        _kv("高风险（待核实）", by_level.get("HIGH", 0), "份"),
+        _kv("中风险（待核实）", by_level.get("MEDIUM", 0), "份"),
+        _kv("最需关注", f"{top['enterprise_name']}（{top['days_left']} 天）", "", top["contract_code"]),
+    ]
+    signals = "；".join(f"{x['label']}（{x['fact']}）" for x in (top.get("signals") or [])[:3])
+    reasons = [
+        f"风险最高的是「{top['enterprise_name']}」，合同 {top['contract_code']} 剩余 {top['days_left']} 天，"
+        f"命中信号：{signals or '无'}。",
+        "排序依据是规则权重求和（到期天数 + 逾期账单 + 未闭环高优工单 + 续租接触），"
+        "**不是退租概率**——系统没有带真实退租标签的数据，不做统计推断。",
+    ]
+    suggestions = [
+        "对高风险合同创建「企业回访」任务并指定责任人，经审批后执行；回访结论回填到任务结果。",
+        "若同时存在逾期账单，建议财务与运营联合拜访，避免只谈续租不谈欠费。",
+        "规则必然有误报：与客户已有沟通记录的，可在风险清单里解除误报并填写理由（会留痕）。",
+    ]
+    risks = [
+        f"清单共 {d['total']} 条，其中 {by_level.get('UNKNOWN', 0)} 条为「证据不足」，需先补齐数据再判断。",
+        "逾期账单与工单未闭环可能同时反映资金与服务问题，处置顺序应由经营负责人判断。",
+    ]
+    conclusion = (f"未来 {d['window_days']} 天有 {d['total']} 份合同进入到期窗口，"
+                  f"其中高风险 {by_level.get('HIGH', 0)} 份、中风险 {by_level.get('MEDIUM', 0)} 份；"
+                  f"最紧急的是「{top['enterprise_name']}」（剩余 {top['days_left']} 天）。")
+
+    return {
+        "response": _block(conclusion, key_data, reasons, suggestions,
+                           f"覆盖 {d['total']} 份到期合同",
+                           risks, ["运营人员", "招商主管", "企业服务专员", "财务人员"],
+                           DecisionStatus.AI_SUGGESTION, True, []),
+        "evidence": r.get("evidence"),
+        "source_ids": {"contract_ids": [x["contract_id"] for x in items[:10]]},
+        "model_version": d.get("rule_version"),
+        "assumptions": {"is_probability": False, "disclaimer": d.get("disclaimer")},
+        "data_quality": {"total": d["total"], "by_level": by_level},
+        "requires_approval": False,
+    }
+
+
+def _run_operating(db: Session, auth: AuthContext, q: str, park_id: int | None) -> dict[str, Any]:
+    """经营优化AI：空置怎么租（方案推演） / 谁可能走（续租风险）。
+
+    两类问题需要的证据完全不同，所以先判意图再取数，避免"一个万能回答"。
+    """
+    risk_words = ("续租", "续约", "退租", "流失", "搬走", "迁出", "挽留", "会不会走")
+    plan_words = ("空置", "出租", "让价", "降租", "涨价", "租金定价", "方案", "推演",
+                  "沙盘", "回本", "净收益", "净贡献", "敏感性")
+    wants_risk = any(w in q for w in risk_words)
+    wants_plan = any(w in q for w in plan_words)
+    if wants_risk and not wants_plan:
+        return _operating_risk(db, auth, park_id)
+    return _operating_plan(db, auth, park_id, question=q)
+
+
 AGENT_RUNNERS = {
     "leasing": _run_leasing,
     "project": _run_project,
@@ -1387,6 +1614,7 @@ AGENT_RUNNERS = {
     "contract": _run_contract,
     "enterprise": _run_enterprise,
     "operations": _run_operations,
+    "operating": _run_operating,
 }
 
 
@@ -1439,6 +1667,13 @@ def answer(db: Session, auth: AuthContext, question: str,
     resp = dict(primary["response"])
     resp["agent_key"] = primary["agent_key"]
     resp["agent_name"] = primary["agent_name"]
+
+    # 经营决策类回答要能自证"数是怎么来的"：来源 id、口径版本、假设、数据质量、
+    # 是否需要人工审批，四项随回答一起下发（提示词 06 的显式要求）。
+    for extra in ("source_ids", "model_version", "assumptions",
+                  "data_quality", "requires_approval"):
+        if extra in primary:
+            resp[extra] = primary[extra]
 
     if others:
         resp["关联分析"] = [{

@@ -34,7 +34,7 @@ from app.models import (
 )
 from app.schemas.common import paginate
 from app.services import operating_engine as engine
-from app.services import renewal_risk_engine as risk_engine
+from app.services import operating_service
 
 router = APIRouter(prefix="/operating", tags=["经营决策"])
 
@@ -300,92 +300,15 @@ def list_scenarios(db: DbSession, auth: CurrentAuth,
 def renewal_risks(db: DbSession, auth: CurrentAuth, park_id: int | None = None,
                   window_days: int = Query(90, ge=1, le=365),
                   level: str | None = None) -> dict[str, Any]:
-    """续租风险待核实清单（规则驱动，带证据链）。"""
+    """续租风险待核实清单（规则驱动，带证据链）。
+
+    取数口径在 app/services/operating_service.py，与 Agent 工具共用同一实现——
+    避免 API 与 AI 各写一遍导致数字分叉（合同到期曾因此出现 37/39 两个值）。
+    """
     auth.require("operating", "VIEW")
     park_id = resolve_park(auth, park_id)
-    today = dt.date.today()
-    horizon = today + dt.timedelta(days=window_days)
-
-    q = _ent_scope(_scope(select(Contract), auth, Contract), auth, Contract.enterprise_id)
-    q = q.where(Contract.status.in_(("ACTIVE", "EXPIRING")))
-    q = q.where(Contract.end_date.isnot(None), Contract.end_date <= horizon)
-    if park_id:
-        q = q.where(Contract.park_id == park_id)
-    contracts = list(db.scalars(q).all())
-
-    # 一次性取回三类信号，避免逐合同查库（N+1）
-    risk_contract_ids = [c.id for c in contracts]
-    bills_by_contract: dict[int, list[dict[str, Any]]] = {}
-    if risk_contract_ids:
-        bq = select(Bill).where(Bill.contract_id.in_(risk_contract_ids),
-                                Bill.status.in_(("OVERDUE", "UNPAID")))
-        for b in db.scalars(bq).all():
-            if (b.overdue_days or 0) > 0 or b.status == "OVERDUE":
-                bills_by_contract.setdefault(b.contract_id, []).append({
-                    "id": b.id, "bill_code": b.bill_code, "arrears": b.arrears,
-                    "overdue_days": b.overdue_days, "due_date": b.due_date.isoformat() if b.due_date else None,
-                })
-
-    orders_by_enterprise: dict[int, list[dict[str, Any]]] = {}
-    ent_ids = [c.enterprise_id for c in contracts if c.enterprise_id]
-    if ent_ids:
-        since = dt.datetime.now() - dt.timedelta(days=risk_engine.ORDER_LOOKBACK_DAYS)
-        oq = select(WorkOrder).where(
-            WorkOrder.enterprise_id.in_(ent_ids),
-            WorkOrder.status.notin_(("CLOSED", "RATED")),
-            WorkOrder.priority.in_(("HIGH", "URGENT")),
-            WorkOrder.submit_at >= since,
-        )
-        for o in db.scalars(oq).all():
-            orders_by_enterprise.setdefault(o.enterprise_id, []).append({
-                "id": o.id, "order_code": o.order_code, "title": o.title,
-                "priority": o.priority,
-                "submit_at": o.submit_at.isoformat() if o.submit_at else None,
-            })
-
-    reviewed = {
-        r.contract_id: r
-        for r in db.scalars(select(OperatingRiskReview)
-                            .order_by(OperatingRiskReview.id.desc())).all()
-    }
-
-    results = []
-    for c in contracts:
-        r = risk_engine.evaluate(
-            contract_id=c.id, contract_code=c.contract_code,
-            enterprise_id=c.enterprise_id, enterprise_name=c.enterprise_name,
-            end_date=c.end_date, today=today,
-            overdue_bills=bills_by_contract.get(c.id),
-            open_orders=orders_by_enterprise.get(c.enterprise_id or -1),
-            renewal_contact=None,
-        )
-        rv = reviewed.get(c.id)
-        r["review"] = ({"decision": rv.decision, "reason": rv.reason,
-                        "decided_by_name": rv.decided_by_name,
-                        "decided_at": rv.created_at.isoformat() if rv.created_at else None}
-                       if rv else None)
-        results.append(r)
-
-    results.sort(key=risk_engine.sort_key)
-    by_level: dict[str, int] = {}
-    for item in results:
-        by_level[item["level"]] = by_level.get(item["level"], 0) + 1
-
-    if level:
-        results = [x for x in results if x["level"] == level]
-
-    return {
-        "items": results,
-        "total": len(results),
-        "by_level": by_level,
-        "window_days": window_days,
-        "level_labels": risk_engine.LEVEL_LABELS,
-        "is_probability": False,
-        "probability_note": risk_engine.evaluate.__doc__.split("\n")[0] if risk_engine.evaluate.__doc__ else "",
-        "rule_version": "renewal-rules-v1",
-        "data_label": "演示数据",
-        "disclaimer": "风险等级由公开规则给出，不是统计概率；每条结论均可回溯到原始记录。",
-    }
+    return operating_service.renewal_risks(db, auth, park_id=park_id,
+                                           window_days=window_days, level=level)
 
 
 @router.post("/renewal-risks/{contract_id}/review")

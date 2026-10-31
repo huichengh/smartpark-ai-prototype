@@ -48,7 +48,7 @@ from app.models import (
     WbsItem,
     WorkOrder,
 )
-from app.services import project_engine, property_engine, safety_engine
+from app.services import operating_service, project_engine, property_engine, safety_engine
 
 logger = logging.getLogger("smartpark")
 
@@ -1703,6 +1703,129 @@ def call_tool(name: str, db: Session, auth: AuthContext, **kwargs) -> dict[str, 
         return {"error": f"工具 {name} 执行失败：{exc}", "tool_error": True,
                 "data_sufficient": False,
                 "missing_data": [f"系统异常：{exc}"], "_tool": name}
+
+
+# ==========================================================================
+# 24. 经营决策：场景推演与续租风险
+# ==========================================================================
+# 这两个工具是"AI 从问答走向决策"的落点。设计上有两条硬约束：
+#   1. 数字一律由 operating_engine 的确定性函数算出，工具不自己算、更不交给模型算；
+#   2. 工具只读或只产出建议，不写任何正式经营数据（L2 上限）。
+
+
+@tool("compare_leasing_scenarios", AIPermissionLevel.L2_ADVISE,
+      "对某个空置空间做招商方案收益推演（A 维持/B 让价/C 分割改造），返回三方案净贡献、"
+      "现金流回正月份与敏感性；结果可复现，不构成报价",
+      ["spaces", "contracts"])
+def compare_leasing_scenarios(db: Session, auth: AuthContext, park_id: int | None = None,
+                              space_id: int | None = None, area: float | None = None,
+                              list_rent: float | None = None, lease_months: int = 36,
+                              vacancy_days: int | None = None, discount: float = 0.0,
+                              service_cost_monthly: float | None = None,
+                              **kw) -> dict[str, Any]:
+    from app.services import operating_engine as oe
+
+    space = operating_service.pick_vacant_space(db, auth, park_id=park_id, space_id=space_id)
+    if space is None and area is None:
+        return {"data": None, "data_sufficient": False,
+                "missing_data": ["当前数据范围内没有可推演的空置空间，也没有提供面积参数"],
+                "_tool": "compare_leasing_scenarios"}
+
+    # 参数优先级：显式入参 > 空间台账；台账也没有就明确说缺，不猜
+    _area = area or (space.rentable_area if space else None)
+    _rent = list_rent or (space.rent_price if space else None)
+    if not _area or not _rent:
+        return {"data": None, "data_sufficient": False,
+                "missing_data": ["缺少面积或挂牌租金，无法推演（请指定 area 与 list_rent）"],
+                "_tool": "compare_leasing_scenarios"}
+
+    # 空置期来源必须写清楚：台账推算可能长达数年，直接拿去推演会被 365 天上限拒算。
+    # 这里不静默截断，而是退回一个**显式假设**并在结果里说明，让使用者自己改。
+    vacancy_source = "使用者指定"
+    if vacancy_days is None:
+        derived = None
+        if space and space.vacant_since:
+            derived = max(0, (dt.date.today() - space.vacant_since).days)
+        if derived is not None and derived <= 365:
+            vacancy_days = derived
+            vacancy_source = f"台账 vacant_since 推算 {derived} 天"
+        else:
+            vacancy_days = 90
+            vacancy_source = (
+                f"台账推算 {derived} 天已超可推演上限 365 天，暂按 90 天假设；"
+                "请按实际招商情况修改" if derived is not None
+                else "台账缺 vacant_since，按 90 天假设")
+
+    scenario = oe.LeaseScenario(
+        area=float(_area), list_rent=float(_rent), lease_months=int(lease_months),
+        discount=float(discount), vacancy_days=int(vacancy_days),
+        service_cost_monthly=float(service_cost_monthly or 0),
+        user_discount=(float(discount) if discount else None),
+    )
+    try:
+        result = oe.compare(scenario)
+    except oe.ScenarioInputError as exc:
+        # 拒算而不是兜底：把不合法的字段原因原样带出去
+        return {"data": None, "data_sufficient": False,
+                "missing_data": [f"参数不合法，已拒算：{exc}"],
+                "_tool": "compare_leasing_scenarios"}
+
+    return {
+        "data": {
+            "space_id": space.id if space else None,
+            "space_name": space.space_name if space else None,
+            "scenarios": result["scenarios"],
+            "notes": result["notes"],
+            "vacancy_source": vacancy_source,
+            "sensitivity": result["sensitivity"],
+            "assumptions": result["assumptions"],
+        },
+        "data_sufficient": True,
+        "requires_approval": result["requires_human_decision"],
+        "evidence": _evidence(
+            ["spaces", "contracts"], 1,
+            {"space_id": space.id if space else None, "park_id": park_id},
+            "净经营贡献 = 租期实收租金 − 招商佣金 − 装修补贴 − 持有成本；现金流从今天起算并含空置期",
+        ),
+        "_tool": "compare_leasing_scenarios",
+    }
+
+
+@tool("list_renewal_risks", AIPermissionLevel.L1_QUERY,
+      "列出续租风险待核实清单（到期天数/逾期账单/未闭环高优工单），每条带证据与规则权重；"
+      "输出为规则标签，不是退租概率",
+      ["contracts", "bills", "work_orders", "operating_risk_reviews"])
+def list_renewal_risks(db: Session, auth: AuthContext, park_id: int | None = None,
+                       window_days: int = 90, level: str | None = None,
+                       limit: int = 10, **kw) -> dict[str, Any]:
+    result = operating_service.renewal_risks(db, auth, park_id=park_id,
+                                             window_days=window_days, level=level)
+    items = result["items"]
+    if not items:
+        return {"data": None, "data_sufficient": False,
+                "missing_data": [f"近 {window_days} 天内没有进入到期窗口的生效合同"],
+                "_tool": "list_renewal_risks"}
+
+    return {
+        "data": {
+            "total": result["total"],
+            "by_level": result["by_level"],
+            "window_days": window_days,
+            "items": items[:limit],
+            "is_probability": False,
+            "rule_version": result["rule_version"],
+            "disclaimer": result["disclaimer"],
+        },
+        "data_sufficient": True,
+        "requires_approval": False,
+        "evidence": _evidence(
+            ["contracts", "bills", "work_orders", "operating_risk_reviews"],
+            result["total"], {"park_id": park_id, "window_days": window_days},
+            "规则权重求和（到期天数 + 逾期账单 + 未闭环高优工单 + 续租接触），"
+            "≥60 高风险 / 30–59 中风险 / <30 低风险；缺关键数据输出「证据不足」",
+        ),
+        "_tool": "list_renewal_risks",
+    }
 
 
 def list_tools() -> list[dict[str, Any]]:
