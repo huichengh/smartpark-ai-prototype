@@ -9,7 +9,7 @@
  * 3. **决策必须由人做**：沙盘只给方案与差额，不下"应该选哪个"的结论；
  *    任务必须经审批才能进入执行，AI 不代批。
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { operatingApi } from '@/api/modules'
 import { useAsync, pushToast } from '@/hooks/useAsync'
 import {
@@ -21,6 +21,13 @@ import { Chart, lineOption } from '@/components/Charts'
 const fmt = (v: any, d = 0) =>
   v == null ? '—' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: d })
 const wan = (v: any) => (v == null ? '—' : `${(Number(v) / 10000).toFixed(1)} 万`)
+/** 剩余天数文案：负数读作"已过期"，0 读作"今天到期"——不要让页面出现"剩余 -1 天"。 */
+const daysLabel = (d: number | null | undefined) => {
+  if (d == null) return '到期日缺失'
+  if (d < 0) return `已过期 ${-d} 天`
+  if (d === 0) return '今天到期'
+  return `剩余 ${d} 天`
+}
 
 const LEVEL_TONE: Record<string, string> = {
   HIGH: 'danger', MEDIUM: 'warn', LOW: 'ok', UNKNOWN: 'muted',
@@ -37,10 +44,13 @@ const NEXT_ACTION: Record<string, [string, string]> = {
   PENDING_REVIEW: ['CLOSED', '验收关闭'],
 }
 
-type Tab = 'overview' | 'sandbox' | 'risk' | 'actions'
+type Tab = 'workspace' | 'overview' | 'sandbox' | 'risk' | 'actions'
 
 export default function Operating() {
-  const [tab, setTab] = useState<Tab>('overview')
+  // 首屏就是三栏工作台：以"今天该做什么"组织，而不是以模块列表组织。
+  const [tab, setTab] = useState<Tab>('workspace')
+  // 从工作台的"收益机会"点进来时，把空间带到沙盘页，避免用户重新找一遍。
+  const [sandboxSpace, setSandboxSpace] = useState<number | null>(null)
 
   return (
     <div className="space-y-5">
@@ -53,16 +63,255 @@ export default function Operating() {
         value={tab}
         onChange={setTab}
         options={[
+          { value: 'workspace', label: '经营工作台' },
           { value: 'overview', label: '经营概览' },
           { value: 'sandbox', label: '收益沙盘' },
           { value: 'risk', label: '续租风险' },
           { value: 'actions', label: '执行任务' },
         ]}
       />
+      {tab === 'workspace' && (
+        <Workspace
+          onOpenSandbox={(id) => { setSandboxSpace(id); setTab('sandbox') }}
+          onOpenTab={setTab}
+        />
+      )}
       {tab === 'overview' && <Overview />}
-      {tab === 'sandbox' && <Sandbox />}
+      {tab === 'sandbox' && <Sandbox presetSpaceId={sandboxSpace} />}
       {tab === 'risk' && <RiskList />}
       {tab === 'actions' && <Actions />}
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------- 三栏工作台 */
+/**
+ * 首屏以"今天该做什么"组织，而不是以模块组织（提示词 09）。
+ *
+ * 三栏的分工：
+ *   左：待办与风险——需要人现在处理的（含逾期任务、待审批）
+ *   中：资产收益机会——空置空间与它的推演入口
+ *   右：推荐行动——由左侧信号派生出的、可一键落地的动作
+ *
+ * 「推荐」全部由规则从接口数据派生（哪条风险、哪个空间、什么理由），
+ * 不在前端编造建议；每条都能点回证据与责任人。
+ */
+function Workspace({ onOpenSandbox, onOpenTab }: {
+  onOpenSandbox: (spaceId: number) => void
+  onOpenTab: (t: Tab) => void
+}) {
+  const metrics = useAsync(() => operatingApi.metrics(), [])
+  const riskData = useAsync(() => operatingApi.renewalRisks({ window_days: 90 }), [])
+  const spaceData = useAsync(() => operatingApi.spaces({ page_size: 6 }), [])
+  const actionData = useAsync(() => operatingApi.actions({ page_size: 50 }), [])
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const todayStr = new Date().toISOString().slice(0, 10)
+  const kpis = (metrics.data?.kpis ?? []).slice(0, 4)
+  const risks: any[] = (riskData.data?.items ?? [])
+    .filter((x: any) => x.level === 'HIGH' || x.level === 'MEDIUM')
+  const actions: any[] = actionData.data?.items ?? []
+  const pending = actions.filter((a) => a.status === 'PENDING_APPROVAL')
+  const overdue = actions.filter((a) => a.due_date && a.due_date < todayStr
+    && a.status !== 'CLOSED' && a.status !== 'CANCELLED')
+  const opportunities: any[] = (spaceData.data?.items ?? []).slice(0, 4)
+
+  const createFollowUp = async (risk: any) => {
+    setBusy(`risk-${risk.contract_id}`)
+    try {
+      await operatingApi.createAction({
+        title: `续租风险回访 · ${risk.enterprise_name ?? risk.contract_code}`,
+        source_type: 'RENEWAL_RISK',
+        source_id: risk.contract_id,
+        contract_id: risk.contract_id,
+        task_template: 'ENTERPRISE_VISIT',
+        priority: risk.level === 'HIGH' ? 'HIGH' : 'MEDIUM',
+      })
+      pushToast('ok', '已创建回访任务（草稿），需审批后才能执行')
+      actionData.reload()
+    } catch (e: any) {
+      pushToast('err', e?.message || '创建任务失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 顶部四项主 KPI：每项都带口径 */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {kpis.map((k: any) => (
+          <KpiCard key={k.key} label={k.label}
+                   value={k.value == null ? '—' : fmt(k.value, k.unit === '%' ? 2 : 0)}
+                   unit={k.unit}
+                   hint={k.unavailable_reason || k.basis}
+                   tone={k.key === 'occupancy_rate' ? 'brand' : k.key === 'vacant_area' ? 'warn' : undefined} />
+        ))}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-12">
+        {/* ---------------- 左：待办与风险 ---------------- */}
+        <div className="space-y-4 lg:col-span-3">
+          <Panel title="今天要处理" subtitle="逾期与待审批优先">
+            {overdue.length === 0 && pending.length === 0 ? (
+              <div className="rounded-lg border border-state-ok/25 bg-state-ok/[0.06] px-3 py-4 text-sm text-state-ok">
+                暂无逾期与待审批事项
+              </div>
+            ) : (
+              <ul className="space-y-2 text-sm">
+                {overdue.slice(0, 3).map((a) => (
+                  <li key={`o-${a.id}`} className="flex items-start gap-2">
+                    <Tag tone="danger">逾期</Tag>
+                    <button className="flex-1 text-left text-slate-200 hover:underline"
+                            onClick={() => onOpenTab('actions')}>
+                      {a.title}
+                      <span className="ml-1 text-xs text-slate-500">（{a.due_date}）</span>
+                    </button>
+                  </li>
+                ))}
+                {pending.slice(0, 3).map((a) => (
+                  <li key={`p-${a.id}`} className="flex items-start gap-2">
+                    <Tag tone="warn">待审批</Tag>
+                    <button className="flex-1 text-left text-slate-200 hover:underline"
+                            onClick={() => onOpenTab('actions')}>
+                      {a.title}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+
+          <Panel title={`续租风险（${risks.length}）`} subtitle="规则标签，非概率">
+            {riskData.loading ? <Loading inline /> : risks.length === 0 ? (
+              <div className="text-sm text-slate-400">暂无中高风险合同</div>
+            ) : (
+              <ul className="space-y-2">
+                {risks.slice(0, 5).map((r) => (
+                  <li key={r.contract_id} className="rounded-lg border border-white/8 px-3 py-2">
+                    <button className="w-full text-left" onClick={() => onOpenTab('risk')}>
+                      <div className="flex items-center gap-2">
+                        <Tag tone={LEVEL_TONE[r.level] as any}>{r.level_label}</Tag>
+                        <span className="text-sm text-slate-200">{r.enterprise_name}</span>
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {daysLabel(r.days_left)} · {r.signal_count} 条信号
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </div>
+
+        {/* ---------------- 中：资产收益机会 ---------------- */}
+        <div className="space-y-4 lg:col-span-5">
+          <Panel title="资产收益机会" subtitle="空置面积优先，点进沙盘可直接推演">
+            {spaceData.loading ? <Loading inline /> : opportunities.length === 0 ? (
+              <EmptyState text="暂无可推演的空置空间" hint="若确认有空间，请检查空间台账的面积与状态是否已录入" />
+            ) : (
+              <div className="space-y-2">
+                {opportunities.map((sp) => (
+                  <div key={sp.id} className="rounded-lg border border-white/8 bg-white/[0.02] px-3 py-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-slate-200">{sp.space_name}</span>
+                      <span className="text-xs text-slate-500">
+                        {fmt(sp.rentable_area, 0)} ㎡ · 挂牌 {fmt(sp.list_rent, 2)} 元/㎡/月
+                      </span>
+                      <span className="ml-auto text-xs text-slate-500">
+                        空置 {sp.vacant_days ?? '—'} 天
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <Btn size="sm" variant="ghost" onClick={() => onOpenSandbox(sp.id)}>
+                        测算招商方案
+                      </Btn>
+                      <span className="text-xs text-slate-500">
+                        三方案对比 · 结果由确定性引擎计算
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Panel>
+
+          <Panel title="口径说明" subtitle="同一口径在 KPI、沙盘与报表之间保持一致">
+            <ul className="space-y-1 text-xs text-slate-400">
+              {(metrics.data?.kpis ?? []).map((k: any) => (
+                <li key={k.key}>· <b className="text-slate-300">{k.label}</b>：{k.basis}</li>
+              ))}
+              {metrics.data?.missing_data?.length > 0 && (
+                <li className="text-state-warn">· 数据缺口：{metrics.data.missing_data.join('；')}</li>
+              )}
+            </ul>
+          </Panel>
+        </div>
+
+        {/* ---------------- 右：推荐行动 ---------------- */}
+        <div className="space-y-4 lg:col-span-4">
+          <Panel title="推荐行动" subtitle="由左侧信号派生，每条都能回溯依据">
+            {(risks.length === 0 && opportunities.length === 0 && pending.length === 0) ? (
+              <div className="rounded-lg border border-state-ok/25 bg-state-ok/[0.06] px-3 py-4 text-sm text-state-ok">
+                暂无需要立即处理的事项
+              </div>
+            ) : (
+              <ol className="space-y-3">
+                {risks.slice(0, 2).map((r) => (
+                  <li key={`rec-${r.contract_id}`} className="rounded-lg border border-state-warn/25 bg-state-warn/[0.05] px-3 py-2.5">
+                    <div className="text-sm font-medium text-slate-100">
+                      对「{r.enterprise_name}」发起续租回访
+                    </div>
+                    <div className="mt-1 text-xs text-slate-400">
+                      依据：{r.level_label}，{daysLabel(r.days_left)}，
+                      {r.signal_count} 条信号（{r.contract_code}）
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">建议责任人：企业服务专员</div>
+                    <div className="mt-2 flex gap-2">
+                      <Btn size="sm" onClick={() => createFollowUp(r)}
+                           disabled={busy === `risk-${r.contract_id}`}>
+                        {busy === `risk-${r.contract_id}` ? '创建中…' : '创建回访任务'}
+                      </Btn>
+                      <Btn size="sm" variant="ghost" onClick={() => onOpenTab('risk')}>看证据</Btn>
+                    </div>
+                  </li>
+                ))}
+
+                {opportunities[0] && (
+                  <li key="rec-space" className="rounded-lg border border-state-info/25 bg-state-info/[0.05] px-3 py-2.5">
+                    <div className="text-sm font-medium text-slate-100">
+                      为「{opportunities[0].space_name}」测算招商方案
+                    </div>
+                    <div className="mt-1 text-xs text-slate-400">
+                      依据：空置 {opportunities[0].vacant_days ?? '—'} 天，
+                      {fmt(opportunities[0].rentable_area, 0)} ㎡ 可出租
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">建议责任人：招商主管</div>
+                    <div className="mt-2">
+                      <Btn size="sm" variant="ghost" onClick={() => onOpenSandbox(opportunities[0].id)}>
+                        去沙盘推演
+                      </Btn>
+                    </div>
+                  </li>
+                )}
+
+                {pending[0] && (
+                  <li key="rec-approve" className="rounded-lg border border-white/10 px-3 py-2.5">
+                    <div className="text-sm font-medium text-slate-100">审批待办任务</div>
+                    <div className="mt-1 text-xs text-slate-400">
+                      依据：{pending[0].action_code} 处于待审批；审批人不能是创建人
+                    </div>
+                    <div className="mt-2">
+                      <Btn size="sm" variant="ghost" onClick={() => onOpenTab('actions')}>去处理</Btn>
+                    </div>
+                  </li>
+                )}
+              </ol>
+            )}
+          </Panel>
+        </div>
+      </div>
     </div>
   )
 }
@@ -123,24 +372,39 @@ const DEFAULT_FORM = {
   fitout_per_sqm: 0, service_cost_monthly: 8000, payment_cycle_days: 30,
 }
 
-function Sandbox() {
+function Sandbox({ presetSpaceId }: { presetSpaceId?: number | null } = {}) {
   const [form, setForm] = useState({ ...DEFAULT_FORM })
-  const [spaceId, setSpaceId] = useState<number | null>(null)
+  const [spaceId, setSpaceId] = useState<number | null>(presetSpaceId ?? null)
+  // 台账里的空置天数可能远超可推演上限（演示库里就有 500+ 天的空间）。
+  // 直接预填会让用户一点提交就撞 422，所以按上限预填并说明，而不是静默截断。
+  const [vacancyNote, setVacancyNote] = useState<string>('')
   const [result, setResult] = useState<any>(null)
   const [busy, setBusy] = useState(false)
   const { data: spacePage } = useAsync(() => operatingApi.spaces({ page_size: 50 }), [])
 
   const spaces = spacePage?.items ?? []
 
+  // 从工作台点「测算招商方案」进来时，空间列表异步加载完成后自动带出面积与挂牌价，
+  // 否则用户会看到一个空表单，以为按钮没生效。
+  useEffect(() => {
+    if (presetSpaceId && spaces.length) pickSpace(presetSpaceId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetSpaceId, spacePage])
+
   const pickSpace = (id: number) => {
     const s = spaces.find((x: any) => x.id === id)
     if (!s) return
     setSpaceId(id)
+    const raw = s.vacant_days ?? 90
+    const capped = Math.min(365, raw)
+    setVacancyNote(raw > 365
+      ? `台账显示已空置 ${raw} 天，超过可推演上限，已按 365 天预填；请按预期招商情况调整`
+      : '')
     setForm((f) => ({
       ...f,
       area: Math.max(1, Math.round(s.rentable_area || f.area)),
       list_rent: s.list_rent || f.list_rent,
-      vacancy_days: s.vacant_days ?? f.vacancy_days,
+      vacancy_days: capped,
     }))
   }
 
@@ -175,7 +439,7 @@ function Sandbox() {
   return (
     <div className="space-y-5">
       <Panel title="推演参数" subtitle="默认值仅为演示假设；空置期是「从今天到起租」的月数来源">
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="选择空间（自动带出面积与挂牌价）">
             <select className={inputCls} value={spaceId ?? ''}
                     onChange={(e) => pickSpace(Number(e.target.value))}>
@@ -205,6 +469,11 @@ function Sandbox() {
             </Field>
           ))}
         </div>
+        {vacancyNote && (
+          <div className="mt-3 rounded-lg border border-state-warn/25 bg-state-warn/[0.06] px-3 py-2 text-xs text-state-warn">
+            {vacancyNote}
+          </div>
+        )}
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <Btn onClick={run} disabled={busy}>{busy ? '推演中…' : '生成三方案对比'}</Btn>
           <span className="text-xs text-slate-500">
@@ -317,7 +586,7 @@ function RiskList() {
                 <span className="text-sm font-medium text-slate-200">{r.enterprise_name ?? '未知企业'}</span>
                 <span className="text-xs text-slate-500">{r.contract_code}</span>
                 <span className="text-xs text-slate-400">
-                  剩余 {r.days_left ?? '—'} 天 · 到期 {r.end_date ?? '—'} · 得分 {r.score}
+                  {daysLabel(r.days_left)} · 到期 {r.end_date ?? '—'} · 得分 {r.score}
                 </span>
                 <span className="ml-auto text-xs text-slate-500">
                   {r.signal_count} 条信号 {expanded === r.contract_id ? '收起' : '展开证据'}

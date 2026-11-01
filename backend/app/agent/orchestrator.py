@@ -1551,11 +1551,12 @@ def _operating_risk(db: Session, auth: AuthContext, park_id: int | None) -> dict
         _kv("到期窗口内合同", d["total"], "份", f"未来 {d['window_days']} 天"),
         _kv("高风险（待核实）", by_level.get("HIGH", 0), "份"),
         _kv("中风险（待核实）", by_level.get("MEDIUM", 0), "份"),
-        _kv("最需关注", f"{top['enterprise_name']}（{top['days_left']} 天）", "", top["contract_code"]),
+        _kv("最需关注", f"{top['enterprise_name']}（{_days_text(top['days_left'])}）", "",
+            top["contract_code"]),
     ]
     signals = "；".join(f"{x['label']}（{x['fact']}）" for x in (top.get("signals") or [])[:3])
     reasons = [
-        f"风险最高的是「{top['enterprise_name']}」，合同 {top['contract_code']} 剩余 {top['days_left']} 天，"
+        f"风险最高的是「{top['enterprise_name']}」，合同 {top['contract_code']}{_days_text(top['days_left'])}，"
         f"命中信号：{signals or '无'}。",
         "排序依据是规则权重求和（到期天数 + 逾期账单 + 未闭环高优工单 + 续租接触），"
         "**不是退租概率**——系统没有带真实退租标签的数据，不做统计推断。",
@@ -1571,7 +1572,7 @@ def _operating_risk(db: Session, auth: AuthContext, park_id: int | None) -> dict
     ]
     conclusion = (f"未来 {d['window_days']} 天有 {d['total']} 份合同进入到期窗口，"
                   f"其中高风险 {by_level.get('HIGH', 0)} 份、中风险 {by_level.get('MEDIUM', 0)} 份；"
-                  f"最紧急的是「{top['enterprise_name']}」（剩余 {top['days_left']} 天）。")
+                  f"最紧急的是「{top['enterprise_name']}」（{_days_text(top['days_left'])}）。")
 
     return {
         "response": _block(conclusion, key_data, reasons, suggestions,
@@ -1585,6 +1586,17 @@ def _operating_risk(db: Session, auth: AuthContext, park_id: int | None) -> dict
         "data_quality": {"total": d["total"], "by_level": by_level},
         "requires_approval": False,
     }
+
+
+def _days_text(d: int | None) -> str:
+    """剩余天数文案：负数说"已过期"，避免出现"剩余 -1 天"这种读起来别扭又容易误读的表述。"""
+    if d is None:
+        return "到期日缺失"
+    if d < 0:
+        return f"已过期 {-d} 天"
+    if d == 0:
+        return "今天到期"
+    return f"剩余 {d} 天"
 
 
 def _run_operating(db: Session, auth: AuthContext, q: str, park_id: int | None) -> dict[str, Any]:
