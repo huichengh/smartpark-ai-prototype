@@ -89,6 +89,9 @@ class ReviewInput(BaseModel):
 
 class ActionCreate(BaseModel):
     title: str = Field(min_length=2, max_length=200)
+    # 集团账号创建任务时必须落到某个园区：否则 park_id 为 NULL，
+    # 园区负责人既看不到也批不了（真实审批链就此断掉）。
+    park_id: int | None = None
     source_type: str = Field(default="MANUAL", pattern="^(RENEWAL_RISK|SCENARIO|MANUAL)$")
     source_id: int | None = None
     task_template: str | None = Field(default=None, pattern="^(PROPERTY_FIX|LEASING_FOLLOWUP|ENTERPRISE_VISIT)$")
@@ -337,6 +340,48 @@ def review_risk(contract_id: int, payload: ReviewInput, db: DbSession, auth: Cur
 
 
 # --------------------------------------------------------------------------- 任务
+#: 已结束的状态不参与超期判断
+TERMINAL_STATUSES = ("CLOSED", "CANCELLED", "REJECTED")
+
+
+def _sla_state(a: OperatingAction, today: dt.date) -> dict[str, Any]:
+    """超期与催办状态（从 timeline 统计，避免为两个计数字段加迁移）。"""
+    timelines = a.timeline or []
+    urges = [t for t in timelines if t.get("to") == "URGE"]
+    overdue = bool(a.due_date and a.due_date < today and a.status not in TERMINAL_STATUSES)
+    return {
+        "overdue": overdue,
+        "overdue_days": (today - a.due_date).days if overdue and a.due_date else 0,
+        "urge_count": len(urges),
+        "last_urged_at": urges[-1]["at"] if urges else None,
+        "terminal": a.status in TERMINAL_STATUSES,
+    }
+
+
+@router.get("/sla-summary")
+def sla_summary(db: DbSession, auth: CurrentAuth) -> dict[str, Any]:
+    """SLA 概览：超期数、临近到期数、待催办数。工作台首屏用它，避免前端重复算。"""
+    auth.require("operating", "VIEW")
+    q = _ent_scope(_scope(select(OperatingAction), auth, OperatingAction),
+                   auth, OperatingAction.enterprise_id)
+    rows = [a for a in db.scalars(q).all() if a.status not in TERMINAL_STATUSES]
+    today = dt.date.today()
+    overdue = [a for a in rows if a.due_date and a.due_date < today]
+    due_soon = [a for a in rows if a.due_date and today <= a.due_date <= today + dt.timedelta(days=2)]
+    no_urge = [a for a in overdue if not [t for t in (a.timeline or []) if t.get("to") == "URGE"]]
+    return {
+        "open_total": len(rows),
+        "overdue": len(overdue),
+        "due_within_3_days": len(due_soon),
+        "overdue_without_urge": len(no_urge),
+        "items": [{"id": a.id, "action_code": a.action_code, "title": a.title,
+                   "status": a.status, "status_label": STATUS_LABELS.get(a.status, a.status),
+                   "due_date": a.due_date.isoformat() if a.due_date else None,
+                   **_sla_state(a, today)} for a in overdue[:10]],
+        "data_label": "演示数据",
+    }
+
+
 @router.get("/actions")
 def list_actions(db: DbSession, auth: CurrentAuth, status: str | None = None,
                  page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
@@ -346,6 +391,7 @@ def list_actions(db: DbSession, auth: CurrentAuth, status: str | None = None,
     if status:
         q = q.where(OperatingAction.status == status)
     rows = list(db.scalars(q.order_by(OperatingAction.id.desc())).all())
+    today = dt.date.today()
     items = [{
         "id": a.id, "action_code": a.action_code, "title": a.title,
         "status": a.status, "status_label": STATUS_LABELS.get(a.status, a.status),
@@ -361,6 +407,8 @@ def list_actions(db: DbSession, auth: CurrentAuth, status: str | None = None,
         "closed_at": a.closed_at.isoformat() if a.closed_at else None,
         "result_note": a.result_note,
         "timeline": a.timeline or [],
+        # 超期与催办在服务端算：前端各自算容易两处口径不一致
+        **_sla_state(a, today),
     } for a in rows]
     return {**paginate(items, page, page_size), "data_label": "演示数据",
             "transition_rules": {k: list(v) for k, v in TRANSITIONS.items()}}
@@ -370,14 +418,25 @@ def list_actions(db: DbSession, auth: CurrentAuth, status: str | None = None,
 def create_action(payload: ActionCreate, db: DbSession, auth: CurrentAuth) -> dict[str, Any]:
     """创建建议任务。创建即草稿，必须经审批才能进入执行（AI 不代批）。"""
     auth.require("operating", "ADD")
-    park_id = resolve_park(auth, None)
 
     contract = db.get(Contract, payload.contract_id) if payload.contract_id else None
     if contract and not auth.can_access_park(contract.park_id):
         raise HTTPException(404, "合同不存在或无权访问")
     if contract:
         auth.require_enterprise(contract.enterprise_id, "企业账号只能为本企业创建任务")
-        park_id = contract.park_id
+
+    # 园区归属必须落定：合同 → 显式指定 → 账号所属园区 → 唯一可见园区。
+    # 都不满足就拒建，而不是留一个 park_id=NULL 的孤儿任务让下游谁都批不了。
+    park_id = (contract.park_id if contract else None) or payload.park_id \
+        or auth.user.park_id
+    if park_id is None:
+        vis = auth.visible_park_ids() or []
+        if len(vis) == 1:
+            park_id = vis[0]
+    if park_id is None:
+        raise HTTPException(422, "集团账号创建任务时必须指定 park_id（归属园区），否则执行人无法接收")
+    if not auth.can_access_park(park_id):
+        raise HTTPException(403, "无权在该园区创建任务")
 
     template = TASK_TEMPLATES.get(payload.task_template or "")
     sla = payload.sla_hours or (template[2] if template else 48)
@@ -459,3 +518,37 @@ def transition_action(action_id: int, payload: TransitionInput, db: DbSession, a
     db.commit()
     return {"id": a.id, "status": a.status, "status_label": STATUS_LABELS.get(a.status, a.status),
             "timeline": timeline}
+
+
+@router.post("/actions/{action_id}/urge")
+def urge_action(action_id: int, db: DbSession, auth: CurrentAuth,
+                note: str | None = Query(None, max_length=200)) -> dict[str, Any]:
+    """催办：只记录一条时间线并写审计，**不改任务状态**。
+
+    为什么不放在 transition 里：催办不是状态迁移，混进去会让状态机多出
+    「催办」这种假状态，越级校验也跟着变复杂。单独一个动作更清楚。
+    """
+    auth.require("operating", "ADD")
+    a = db.get(OperatingAction, action_id)
+    if not a or not auth.can_access_park(a.park_id):
+        raise HTTPException(404, "任务不存在或无权访问")
+    auth.require_enterprise(a.enterprise_id, "企业账号只能催办本企业任务")
+    if a.status in TERMINAL_STATUSES:
+        raise HTTPException(422, f"任务已{STATUS_LABELS.get(a.status, a.status)}，无需催办")
+
+    now = dt.datetime.now()
+    timeline = list(a.timeline or [])
+    timeline.append({
+        "at": now.isoformat(timespec="seconds"),
+        "from": a.status, "to": "URGE",
+        "by": auth.user.real_name,
+        "note": note or "催办",
+    })
+    a.timeline = timeline
+    write_audit(db, module="operating", action="EDIT", auth=auth, object_type="OperatingAction",
+                object_id=a.id, object_name=a.title,
+                change_summary=f"催办：{note or '未填写说明'}")
+    db.commit()
+    return {"id": a.id, "urge_count": len([t for t in timeline if t.get("to") == "URGE"]),
+            "last_urged_at": now.isoformat(timespec="seconds"),
+            "message": f"已催办「{a.title}」"}

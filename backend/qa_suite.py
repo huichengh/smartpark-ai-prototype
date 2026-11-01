@@ -228,6 +228,75 @@ def group_auth() -> None:
     expect(st == 200, G, "有效令牌可访问", f"实际 {st}")
 
 
+def group_operating_loop() -> None:
+    """经营任务闭环：创建 → 审批（双人）→ 越级拦截 → 催办 → 关闭。
+
+    这条链是"AI 建议走向执行"的落点，最容易出两类问题：
+    状态能被越级跳过、催办把状态改乱。所以逐条断言。
+    """
+    G = "经营闭环"
+    admin, pm = login("admin"), login("p1_manager")
+
+    # 集团账号不指定园区：必须拒建，否则会留下园区负责人也批不了的孤儿任务
+    st, d = call("POST", "/operating/actions", admin, body={
+        "title": "QA 自动化：无园区任务", "source_type": "MANUAL"})
+    expect(st == 422, G, "集团账号未指定园区时拒建任务", f"实际 {st} {str(d)[:90]}")
+
+    st, d = call("POST", "/operating/actions", admin, body={
+        "title": "QA 自动化：变更影响回访", "park_id": 1,
+        "source_type": "MANUAL", "task_template": "ENTERPRISE_VISIT", "priority": "HIGH",
+    })
+    ok = st == 200 and isinstance(d, dict) and d.get("id")
+    expect(bool(ok), G, "可创建建议任务", f"实际 {st} {str(d)[:100]}")
+    if not ok:
+        return
+    aid = d["id"]
+    expect(d.get("status") == "DRAFT", G, "新建任务为草稿（AI 不代批）", f"{d.get('status')}")
+
+    # 越级：草稿直接跳执行
+    st, d = call("POST", f"/operating/actions/{aid}/transition", admin, body={"to_status": "IN_PROGRESS"})
+    expect(st == 422, G, "草稿不能直接跳到执行中", f"实际 {st}")
+    expect(isinstance(d, dict) and "当前可选" in str((d or {}).get("error", {}).get("message", "")),
+           G, "越级时返回当前可选状态", str(d)[:120])
+
+    # 双人原则：自己批自己
+    call("POST", f"/operating/actions/{aid}/transition", admin, body={"to_status": "PENDING_APPROVAL"})
+    st, d = call("POST", f"/operating/actions/{aid}/transition", admin, body={"to_status": "APPROVED"})
+    expect(st == 403, G, "创建人不能审批自己提交的任务（双人原则）", f"实际 {st}")
+
+    # 换人审批
+    st, d = call("POST", f"/operating/actions/{aid}/transition", pm, body={"to_status": "APPROVED"})
+    expect(st == 200, G, "另一名有审批权限的人可以批准", f"实际 {st} {str(d)[:100]}")
+
+    # 催办：不改状态，只累加次数
+    st, d = call("POST", f"/operating/actions/{aid}/urge?note=QA%20%E5%82%AC%E5%8A%9E", admin)
+    expect(st == 200 and (d or {}).get("urge_count") == 1, G, "催办记录一次并返回次数",
+           f"实际 {st} {str(d)[:80]}")
+    st, d = call("POST", f"/operating/actions/{aid}/urge", pm)
+    expect(st == 200 and (d or {}).get("urge_count") == 2, G, "再次催办次数累加", f"{st} {str(d)[:80]}")
+
+    st, d = call("GET", "/operating/actions?page_size=200", admin)
+    row = next((x for x in ((d or {}).get("items") or []) if x.get("id") == aid), {})
+    expect(row.get("status") == "APPROVED", G, "催办不改变任务状态", f"{row.get('status')}")
+    expect(row.get("urge_count") == 2, G, "列表返回催办次数", f"{row.get('urge_count')}")
+    expect(row.get("overdue") is False, G, "未到期任务不标记超期", f"{row.get('overdue')}")
+
+    # 关闭后不可再催办
+    for to in ("IN_PROGRESS", "PENDING_REVIEW", "CLOSED"):
+        st, _ = call("POST", f"/operating/actions/{aid}/transition", pm,
+                     body={"to_status": to, "result_note": "QA 关闭"})
+        if st != 200:
+            record("WARN", G, f"推进到 {to} 失败", f"{st}")
+            break
+    st, d = call("POST", f"/operating/actions/{aid}/urge", admin)
+    expect(st == 422, G, "已关闭任务不能催办", f"实际 {st}")
+
+    # SLA 概览
+    st, d = call("GET", "/operating/sla-summary", admin)
+    expect(st == 200 and isinstance((d or {}).get("open_total"), int), G,
+           "SLA 概览可用", f"{st} {str(d)[:80]}")
+
+
 def group_parameters() -> None:
     """参数边界：坏参数不得产生 5xx。"""
     G = "参数边界"
@@ -364,7 +433,7 @@ def main() -> int:
         return 1
 
     for fn in (group_auth, group_scope_isolation, group_write_privilege,
-               group_parameters, group_consistency):
+               group_operating_loop, group_parameters, group_consistency):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

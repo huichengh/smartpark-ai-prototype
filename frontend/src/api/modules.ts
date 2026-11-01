@@ -446,6 +446,10 @@ export const operatingApi = {
   createAction: (body: Record<string, any>) => api.post<any>('/operating/actions', body),
   transition: (id: number, to_status: string, note?: string, result_note?: string) =>
     api.post<any>(`/operating/actions/${id}/transition`, { to_status, note, result_note }),
+  /** 催办只记录时间线，不改变任务状态 */
+  urge: (id: number, note?: string) =>
+    api.post<any>(`/operating/actions/${id}/urge`, undefined, note ? { note } : undefined),
+  slaSummary: () => api.get<any>('/operating/sla-summary'),
 }
 
 // ================================================================ 项目变更影响（提示词 08）

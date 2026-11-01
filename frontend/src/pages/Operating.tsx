@@ -106,14 +106,14 @@ function Workspace({ onOpenSandbox, onOpenTab }: {
   const actionData = useAsync(() => operatingApi.actions({ page_size: 50 }), [])
   const [busy, setBusy] = useState<string | null>(null)
 
-  const todayStr = new Date().toISOString().slice(0, 10)
+  const sla = useAsync(() => operatingApi.slaSummary(), [])
   const kpis = (metrics.data?.kpis ?? []).slice(0, 4)
   const risks: any[] = (riskData.data?.items ?? [])
     .filter((x: any) => x.level === 'HIGH' || x.level === 'MEDIUM')
   const actions: any[] = actionData.data?.items ?? []
   const pending = actions.filter((a) => a.status === 'PENDING_APPROVAL')
-  const overdue = actions.filter((a) => a.due_date && a.due_date < todayStr
-    && a.status !== 'CLOSED' && a.status !== 'CANCELLED')
+  // 超期由后端判定（含"已结束状态不算超期"的口径），前端不再自己比日期
+  const overdue = actions.filter((a) => a.overdue)
   const opportunities: any[] = (spaceData.data?.items ?? []).slice(0, 4)
 
   const createFollowUp = async (risk: any) => {
@@ -152,7 +152,10 @@ function Workspace({ onOpenSandbox, onOpenTab }: {
       <div className="grid gap-4 lg:grid-cols-12">
         {/* ---------------- 左：待办与风险 ---------------- */}
         <div className="space-y-4 lg:col-span-3">
-          <Panel title="今天要处理" subtitle="逾期与待审批优先">
+          <Panel title="今天要处理" subtitle={
+            sla.data ? `超期 ${sla.data.overdue} · 3 天内到期 ${sla.data.due_within_3_days} · 未催办 ${sla.data.overdue_without_urge}`
+                     : '逾期与待审批优先'
+          }>
             {overdue.length === 0 && pending.length === 0 ? (
               <div className="rounded-lg border border-state-ok/25 bg-state-ok/[0.06] px-3 py-4 text-sm text-state-ok">
                 暂无逾期与待审批事项
@@ -161,11 +164,13 @@ function Workspace({ onOpenSandbox, onOpenTab }: {
               <ul className="space-y-2 text-sm">
                 {overdue.slice(0, 3).map((a) => (
                   <li key={`o-${a.id}`} className="flex items-start gap-2">
-                    <Tag tone="danger">逾期</Tag>
+                    <Tag tone="danger">超期 {a.overdue_days} 天</Tag>
                     <button className="flex-1 text-left text-slate-200 hover:underline"
                             onClick={() => onOpenTab('actions')}>
                       {a.title}
-                      <span className="ml-1 text-xs text-slate-500">（{a.due_date}）</span>
+                      <span className="ml-1 text-xs text-slate-500">
+                        （截止 {a.due_date}{a.urge_count ? ` · 已催办 ${a.urge_count} 次` : ' · 未催办'}）
+                      </span>
                     </button>
                   </li>
                 ))}
@@ -650,6 +655,17 @@ function Actions() {
     }
   }
 
+  // 催办只写时间线，不改状态——所以推完仍停在原状态，是预期行为
+  const urge = async (a: any) => {
+    try {
+      const r = await operatingApi.urge(a.id)
+      pushToast('ok', `已催办（累计 ${r.urge_count} 次），任务状态不变`)
+      reload()
+    } catch (e: any) {
+      pushToast('err', e?.message || '催办失败')
+    }
+  }
+
   return (
     <Panel
       title={`执行任务（${data?.total ?? 0}）`}
@@ -667,13 +683,25 @@ function Actions() {
             ) },
             { key: 'priority', title: '优先级' },
             { key: 'owner_role', title: '责任角色', render: (r) => r.owner_role ?? '—' },
-            { key: 'due_date', title: '截止' },
+            { key: 'due_date', title: '截止', render: (r) => (
+              <span className={r.overdue ? 'text-state-risk' : ''}>
+                {r.due_date ?? '—'}
+                {r.overdue ? `（超期 ${r.overdue_days} 天）` : ''}
+                {r.urge_count ? ` · 催办 ${r.urge_count}` : ''}
+              </span>
+            ) },
             { key: 'created_by_name', title: '创建人' },
             { key: 'op', title: '操作', render: (r) => {
               const next = NEXT_ACTION[r.status]
-              if (!next) return <span className="text-slate-500">已结束</span>
               return (
-                <Btn size="sm" variant="ghost" onClick={() => advance(r, next[0])}>{next[1]}</Btn>
+                <span className="inline-flex gap-1">
+                  {next
+                    ? <Btn size="sm" variant="ghost" onClick={() => advance(r, next[0])}>{next[1]}</Btn>
+                    : <span className="self-center text-slate-500">已结束</span>}
+                  {!r.terminal && (
+                    <Btn size="sm" variant="ghost" onClick={() => urge(r)}>催办</Btn>
+                  )}
+                </span>
               )
             } },
           ]}
