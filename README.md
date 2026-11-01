@@ -166,6 +166,11 @@ cd frontend && npm run dev       # → http://127.0.0.1:5173（已配 /api 代�
 
 详见 [`docs/经营决策模块说明.md`](docs/经营决策模块说明.md)；金标准用例 `backend/check_operating.py`（33 条）。
 
+**项目变更影响分析（提示词 08）**：项目详情页新增「变更影响分析」——推演审批延误/停工/资源冲突
+对工期、关键路径、里程碑与成本的影响。**只推演不落地**：模拟不改计划，要改必须走变更申请 + 人工审批，
+且服务端重算、不采信前端数字；不输出"延期概率"。与甘特图共用同一份 CPM 实现。
+详见 [`docs/项目变更影响分析.md`](docs/项目变更影响分析.md)；金标准 `backend/check_change_impact.py`（30 条）。
+
 ### 4.1 权限：RBAC + 数据范围双模型
 
 - **功能权限**：15 角色 × 9 动作（VIEW/ADD/EDIT/DELETE/IMPORT/EXPORT/APPROVE/AI/CONFIG）

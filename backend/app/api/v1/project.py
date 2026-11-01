@@ -16,6 +16,7 @@ import datetime as dt
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 
 from app.core.audit import write_audit
@@ -38,6 +39,7 @@ from app.models import (
     WbsItem,
 )
 from app.schemas.common import paginate
+from app.services import change_impact_engine as cie
 from app.services import project_engine
 
 router = APIRouter(prefix="/projects", tags=["项目管理"])
@@ -829,3 +831,147 @@ def decide_change(project_id: int, change_id: int, decision: str, db: DbSession,
                     + (f"。{impact_note}" if impact_note else "")),
         "status": c.status, "impact_note": impact_note,
     }
+
+
+# ==========================================================================
+# 变更影响分析（提示词 08）
+# ==========================================================================
+# 定位：**只推演、不落地**。模拟阶段不写 wbs_items / projects，
+# 要真正改计划必须先建变更单（PENDING），再由 /changes/{id}/decision 审批后生效。
+# 服务端会重新计算一遍，不采信前端传来的天数与金额。
+
+
+class ChangeScenarioItem(BaseModel):
+    task_id: int
+    delay_days: int = Field(ge=0, le=cie.MAX_DELAY_DAYS)
+    type: str = "SHUTDOWN"
+    note: str | None = Field(default=None, max_length=200)
+
+
+class ChangeImpactInput(BaseModel):
+    scenarios: list[ChangeScenarioItem] = Field(min_length=1, max_length=20)
+    daily_cost: float | None = Field(default=None, ge=0, le=1_000_000)
+
+
+def _run_change_simulation(db, auth, project_id: int, payload: ChangeImpactInput) -> tuple[Any, dict]:
+    """加载网络 → 纯函数推演。返回 (project, simulation)。"""
+    p = db.get(Project, project_id)
+    if not p or not auth.can_access_park(p.park_id):
+        raise HTTPException(404, "项目不存在或无权访问")
+
+    net = project_engine.build_network(db, project_id)
+    if not net["leaves"]:
+        raise HTTPException(400, "该项目尚未建立 WBS，无法做变更影响分析")
+
+    tasks = [{
+        "id": w.id, "wbs_code": w.wbs_code, "name": w.item_name,
+        "duration": project_engine.task_duration(w),
+        "owner_name": w.owner_name, "budget": w.budget, "progress": w.progress,
+    } for w in net["leaves"]]
+    edges = [{"pred": d.predecessor_id, "succ": d.successor_id,
+              "dep_type": d.dep_type, "lag": d.lag_days or 0} for d in net["deps"]]
+
+    milestones = []
+    if p.start_date:
+        for m in db.scalars(select(Milestone).where(Milestone.project_id == project_id)
+                            .order_by(Milestone.sort_order)).all():
+            milestones.append({
+                "milestone_code": m.milestone_code, "milestone_name": m.milestone_name,
+                "plan_date": m.plan_date.isoformat() if m.plan_date else None,
+                "status": m.status,
+            })
+
+    try:
+        sim = cie.simulate(
+            tasks, edges,
+            [sc.model_dump() for sc in payload.scenarios],
+            daily_cost=payload.daily_cost,
+            milestones=milestones,
+        )
+    except cie.ScenarioInputError as exc:
+        raise HTTPException(422, f"参数不可用于推演：{exc}") from exc
+
+    # 里程碑推定日期由引擎统一计算（含"已完成不顺移"规则），此处不再重复实现
+    sim["project"] = {
+        "id": p.id, "project_code": p.project_code, "project_name": p.project_name,
+        "baseline_end_date": (p.baseline_end_date or p.planned_end_date).isoformat()
+        if (p.baseline_end_date or p.planned_end_date) else None,
+        "budget": p.budget,
+    }
+    sim["network"] = {"task_count": len(tasks), "dependency_count": len(edges),
+                      "implicit_chain": net["implicit_chain"]}
+    sim["risk_templates"] = cie.RISK_TEMPLATES
+    return p, sim
+
+
+@router.post("/{project_id}/change-impact")
+def project_change_impact(project_id: int, payload: ChangeImpactInput,
+                          db: DbSession, auth: CurrentAuth) -> dict[str, Any]:
+    """变更影响推演（只读，不改动任何正式计划）。"""
+    auth.require("project", "VIEW")
+    _, sim = _run_change_simulation(db, auth, project_id, payload)
+    return sim
+
+
+@router.post("/{project_id}/change-requests")
+def create_change_request(project_id: int, payload: ChangeImpactInput,
+                          db: DbSession, auth: CurrentAuth,
+                          title: str = Query(..., min_length=2, max_length=120),
+                          change_type: str = Query("SCHEDULE"),
+                          reason: str | None = Query(None, max_length=500)) -> dict[str, Any]:
+    """把推演结果固化成变更申请（PENDING，必须人工审批才会改计划）。
+
+    天数与金额由服务端重算，**不采信前端**——否则前端传个 0 就能把影响抹平。
+    """
+    auth.require("project", "ADD")
+    p, sim = _run_change_simulation(db, auth, project_id, payload)
+
+    seq = len(list(db.scalars(select(ProjectChange)
+                              .where(ProjectChange.project_id == project_id)).all())) + 1
+    before = {
+        "planned_end_date": (p.planned_end_date.isoformat() if p.planned_end_date else None),
+        "baseline_end_date": (p.baseline_end_date.isoformat() if p.baseline_end_date else None),
+        "budget": p.budget,
+        "duration_days": sim["baseline"]["duration_days"],
+    }
+    after = {
+        "duration_days": sim["adjusted"]["duration_days"],
+        "schedule_shift_days": sim["schedule_shift_days"],
+        "cost_impact": sim["cost_impact"],
+        "critical_path": sim["adjusted"]["critical_path"],
+        "scenarios": sim["scenarios"],
+    }
+    obj = ProjectChange(
+        project_id=project_id,
+        change_code=f"CHG{project_id:02d}{seq:03d}",
+        change_title=title,
+        change_type=change_type,
+        change_reason=reason or "；".join(
+            f"{s['type_label']}：{s.get('wbs_code') or s['task_id']} 顺延 {s['delay_days']} 天"
+            for s in sim["scenarios"]),
+        before_snapshot=before,
+        after_snapshot=after,
+        impact_scope=f"影响 {sim['affected_count']} 个任务，新增关键任务 {len(sim['new_critical_tasks'])} 个",
+        impact_schedule_days=sim["schedule_shift_days"],
+        impact_cost=sim["cost_impact"] or 0,
+        impact_risk="；".join(f"{t['label']}：{'、'.join(t['factors'][:2])}"
+                              for t in cie.RISK_TEMPLATES.values()),
+        ai_analysis={"assumptions": sim["assumptions"], "notes": sim.get("notes", [])},
+        applicant_id=auth.user.id,
+        applicant_name=auth.user.real_name,
+        apply_date=dt.date.today(),
+        status="PENDING",
+        is_baseline_change=True,
+    )
+    db.add(obj)
+    db.flush()
+    write_audit(db, module="project", action="ADD", auth=auth, object_type="ProjectChange",
+                object_id=obj.id, object_name=f"{obj.change_code} {obj.change_title}",
+                change_summary=(f"提交变更申请：工期顺延 {obj.impact_schedule_days} 天"
+                                f"，成本影响 {obj.impact_cost:,.2f} 元（待审批）"),
+                source="USER")
+    db.commit()
+    return {"id": obj.id, "change_code": obj.change_code, "status": obj.status,
+            "impact_schedule_days": obj.impact_schedule_days,
+            "impact_cost": obj.impact_cost,
+            "message": "变更申请已提交，需审批通过后才会更新项目基线"}

@@ -447,3 +447,12 @@ export const operatingApi = {
   transition: (id: number, to_status: string, note?: string, result_note?: string) =>
     api.post<any>(`/operating/actions/${id}/transition`, { to_status, note, result_note }),
 }
+
+// ================================================================ 项目变更影响（提示词 08）
+// 注意：模拟接口只读，不改计划；要落地必须走 changeRequests → 审批。
+export const projectChangeApi = {
+  simulate: (id: number, body: Record<string, any>) =>
+    api.post<any>(`/projects/${id}/change-impact`, body),
+  createRequest: (id: number, params: Record<string, any>, body: Record<string, any>) =>
+    api.post<any>(`/projects/${id}/change-requests`, body, params),
+}

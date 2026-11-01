@@ -12,12 +12,12 @@
  */
 import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { projectApi } from '@/api/modules'
+import { projectApi, projectChangeApi } from '@/api/modules'
 import { ApiException } from '@/api/client'
 import { useAsync, pushToast } from '@/hooks/useAsync'
 import {
-  Btn, DataTable, EmptyState, ErrorState, KpiCard, Loading,
-  PageHeader, Panel, ProgressBar, Segmented, Tag, cx,
+  Btn, DataTable, EmptyState, ErrorState, Field, KpiCard, Loading,
+  PageHeader, Panel, ProgressBar, Segmented, Tag, cx, inputCls,
 } from '@/components/ui'
 import { Chart, barOption, lineOption, pieOption } from '@/components/Charts'
 import type { EChartsOption } from 'echarts'
@@ -34,7 +34,7 @@ const RISK_TONE: Record<string, string> = { HIGH: 'danger', MEDIUM: 'warn', LOW:
 const METHOD_TONE: Record<string, string> = { WATERFALL: 'info', AGILE: 'ai', HYBRID: 'warn' }
 
 type AnyRow = Record<string, any>
-type Tab = 'overview' | 'gantt' | 'wbs' | 'evm' | 'risk' | 'issues' | 'agile'
+type Tab = 'overview' | 'gantt' | 'wbs' | 'evm' | 'risk' | 'issues' | 'change' | 'agile'
 
 export default function ProjectDetail() {
   const { id } = useParams()
@@ -43,7 +43,7 @@ export default function ProjectDetail() {
 
   const detail = useAsync(() => projectApi.detail(projectId), [projectId], { enabled: !!projectId })
   const gantt = useAsync(() => projectApi.gantt(projectId), [projectId], {
-    enabled: !!projectId && (tab === 'gantt' || tab === 'overview'),
+    enabled: !!projectId && (tab === 'gantt' || tab === 'overview' || tab === 'change'),
   })
   const evm = useAsync(() => projectApi.evm(projectId), [projectId], {
     enabled: !!projectId && (tab === 'evm' || tab === 'overview'),
@@ -65,6 +65,7 @@ export default function ProjectDetail() {
       { value: 'evm', label: '挣值分析' },
       { value: 'risk', label: '风险矩阵' },
       { value: 'issues', label: '问题与变更' },
+      { value: 'change', label: '变更影响分析' },
     ]
     if (method === 'AGILE' || method === 'HYBRID') {
       base.push({ value: 'agile', label: '敏捷看板' })
@@ -126,6 +127,7 @@ export default function ProjectDetail() {
       {tab === 'evm' && <EvmTab data={evm.data} loading={evm.loading} error={evm.error} onRetry={evm.reload} />}
       {tab === 'risk' && <RiskTab data={detail.data} />}
       {tab === 'issues' && <IssuesTab data={detail.data} projectId={projectId} onChanged={detail.reload} />}
+      {tab === 'change' && <ChangeImpactTab gantt={gantt.data} projectId={projectId} />}
       {tab === 'agile' && (
         <AgileTab data={agile.data} loading={agile.loading} error={agile.error} onRetry={agile.reload}
                   method={p.management_method} />
@@ -1300,4 +1302,196 @@ function AgileTab({ data, loading, error, onRetry, method }: any) {
       </Panel>
     </div>
   )
+}
+
+
+/* ------------------------------------------------------- 变更影响分析（提示词 08） */
+/**
+ * 只推演、不落地：
+ *  - 模拟阶段完全不改计划，结果里明确 `baseline_untouched=true`；
+ *  - 要改计划必须先提交变更申请，再由审批人批准（服务端重算，不采信前端数字）；
+ *  - 不输出"延期概率"——没有带标签的历史数据，任何概率都是编的。
+ */
+const CHANGE_TYPES = [
+  { value: 'SHUTDOWN', label: '停工' },
+  { value: 'APPROVAL_DELAY', label: '审批延误' },
+  { value: 'RESOURCE_CONFLICT', label: '资源冲突' },
+  { value: 'DESIGN_CHANGE', label: '设计变更' },
+]
+
+function ChangeImpactTab({ gantt, projectId }: any) {
+  const tasks: any[] = (gantt?.tasks ?? [])
+  const [taskId, setTaskId] = useState<number | null>(null)
+  const [days, setDays] = useState(10)
+  const [ctype, setCtype] = useState('SHUTDOWN')
+  const [dailyCost, setDailyCost] = useState(5000)
+  const [sim, setSim] = useState<any>(null)
+  const [busy, setBusy] = useState(false)
+
+  // 默认选中第一条关键任务：非关键任务的顺延常常被时差吃掉，选择它会让人以为"推演没生效"
+  const defaultTask = useMemo(
+    () => tasks.find((t) => t.is_critical) ?? tasks[0], [tasks])
+  const current = tasks.find((t) => t.id === (taskId ?? defaultTask?.id))
+
+  const run = async () => {
+    const tid = taskId ?? defaultTask?.id
+    if (!tid) return
+    setBusy(true)
+    try {
+      const r = await projectChangeApi.simulate(projectId, {
+        scenarios: [{ task_id: tid, delay_days: Number(days), type: ctype }],
+        daily_cost: Number(dailyCost) || null,
+      })
+      setSim(r)
+    } catch (e: any) {
+      pushToast('err', e?.message || '推演失败：请检查参数')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const submit = async () => {
+    const tid = taskId ?? defaultTask?.id
+    if (!tid || !sim) return
+    setBusy(true)
+    try {
+      const r = await projectChangeApi.createRequest(
+        projectId,
+        { title: `变更影响申请：${current?.wbs_code ?? ''} 顺延 ${days} 天`,
+          change_type: 'SCHEDULE',
+          reason: `${ctype} 导致 ${current?.item_name ?? ''} 顺延 ${days} 天` },
+        { scenarios: [{ task_id: tid, delay_days: Number(days), type: ctype }],
+          daily_cost: Number(dailyCost) || null },
+      )
+      pushToast('ok', `${r.change_code} 已提交，审批通过后才会更新基线`)
+    } catch (e: any) {
+      pushToast('err', e?.message || '提交失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!tasks.length) return <EmptyState text="该项目尚未建立 WBS" hint="建立 WBS 与依赖关系后才能做变更影响分析" />
+
+  return (
+    <div className="space-y-4">
+      <Panel title="情景设置" subtitle="模拟不改动正式计划；结果需提交变更申请并经审批才生效">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Field label="影响任务">
+            <select className={inputCls} value={tidOf(taskId, defaultTask)}
+                    onChange={(e) => setTaskId(Number(e.target.value))}>
+              {tasks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.wbs_code} {t.item_name}{t.is_critical ? '（关键）' : ''}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="变更类型">
+            <select className={inputCls} value={ctype} onChange={(e) => setCtype(e.target.value)}>
+              {CHANGE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </Field>
+          <Field label="顺延天数">
+            <input className={inputCls} type="number" min={0} max={365}
+                   value={days} onChange={(e) => setDays(Number(e.target.value))} />
+          </Field>
+          <Field label="日成本（元/天，可留空）">
+            <input className={inputCls} type="number" min={0}
+                   value={dailyCost} onChange={(e) => setDailyCost(Number(e.target.value))} />
+          </Field>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Btn onClick={run} disabled={busy}>{busy ? '推演中…' : '推演影响'}</Btn>
+          <span className="text-xs text-slate-500">
+            不提供日成本时不出成本数字——宁可不给，也不猜。
+          </span>
+        </div>
+      </Panel>
+
+      {!sim ? (
+        <EmptyState text="还没有推演结果" hint="选择任务与顺延天数后点「推演影响」" />
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <KpiCard label="基准工期" value={fmt(sim.baseline.duration_days)} unit="天" />
+            <KpiCard label="调整后工期" value={fmt(sim.adjusted.duration_days)} unit="天"
+                     tone={sim.schedule_shift_days > 0 ? 'warn' : 'ok'} />
+            <KpiCard label="工期顺延" value={fmt(sim.schedule_shift_days)} unit="天"
+                     hint={sim.shift_ratio != null ? `占基准工期 ${sim.shift_ratio}%` : ''} />
+            <KpiCard label="成本影响"
+                     value={sim.cost_impact == null ? '—' : wan(sim.cost_impact)}
+                     unit={sim.cost_impact == null ? '' : '元'}
+                     hint={sim.cost_note} />
+          </div>
+
+          <Panel title="受影响任务" subtitle={`共 ${sim.affected_count} 个，其中完工顺延 ${sim.schedule_shifted_count} 个`}>
+            <DataTable<any>
+              columns={[
+                { key: 'wbs_code', title: 'WBS' },
+                { key: 'name', title: '任务' },
+                { key: 'change_kind_label', title: '影响', render: (r) => (
+                  <Tag tone={r.change_kind === 'FINISH_SHIFT' ? 'warn' : 'muted'}>{r.change_kind_label}</Tag>
+                ) },
+                { key: 'owner_name', title: '责任人', render: (r) => r.owner_name ?? '—' },
+                { key: 'baseline_ef', title: '基准完工', render: (r) => `第 ${r.baseline_ef} 天` },
+                { key: 'adjusted_ef', title: '调整后完工', render: (r) => `第 ${r.adjusted_ef} 天` },
+              ]}
+              rows={sim.affected_tasks}
+              rowKey={(r) => r.task_id}
+            />
+            <div className="mt-2 text-xs text-slate-500">
+              只影响时差、不影响完工的任务也会列出——它们变关键了，但不需要追加资源。
+            </div>
+          </Panel>
+
+          {sim.milestones?.length > 0 && (
+            <Panel title="里程碑影响" subtitle="已完成里程碑不顺移（既成事实）">
+              <DataTable<any>
+                columns={[
+                  { key: 'milestone_name', title: '里程碑' },
+                  { key: 'status', title: '状态' },
+                  { key: 'plan_date', title: '计划日期' },
+                  { key: 'projected_date', title: '推定日期' },
+                  { key: 'projected_shift_days', title: '顺移', render: (r) => r.achieved ? '—' : `${r.projected_shift_days} 天` },
+                ]}
+                rows={sim.milestones}
+                rowKey={(r) => r.milestone_code}
+              />
+            </Panel>
+          )}
+
+          <Panel title="风险因素（模板，需项目人员确认）" subtitle="仅为常见因素清单，不是对本项目的判定">
+            <div className="grid gap-3 sm:grid-cols-3">
+              {Object.entries(sim.risk_templates ?? {}).map(([k, v]: any) => (
+                <div key={k} className="rounded-lg border border-white/8 px-3 py-2">
+                  <div className="text-sm text-slate-200">{v.label}</div>
+                  <ul className="mt-1 space-y-0.5 text-xs text-slate-400">
+                    {v.factors.map((f: string) => <li key={f}>· {f}</li>)}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </Panel>
+
+          <div className="rounded-xl border border-state-warn/25 bg-state-warn/[0.06] px-4 py-3 text-xs text-slate-300">
+            <b className="text-state-warn">口径</b>：{sim.assumptions?.statement}
+            <div className="mt-1 text-slate-500">{sim.assumptions?.milestone_rule}</div>
+            <div className="mt-3 flex gap-2">
+              <Btn size="sm" onClick={submit} disabled={busy}>
+                {busy ? '提交中…' : '提交变更申请'}
+              </Btn>
+              <span className="self-center text-slate-500">
+                提交后进入待审批；审批通过才会更新项目基线（当前结果未改动计划）
+              </span>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function tidOf(selected: number | null, fallback: any): number | string {
+  return selected ?? fallback?.id ?? ''
 }

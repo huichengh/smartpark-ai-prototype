@@ -59,6 +59,126 @@ def milestone_stats(db: Session, project_ids: list[int]) -> dict[int, tuple[int,
 # --------------------------------------------------------------------------
 
 
+def build_network(db: Session, project_id: int) -> dict[str, Any]:
+    """加载项目网络：叶子任务、依赖关系、是否使用了隐式链。
+
+    甘特图（关键路径）与变更影响模拟都用这一份，避免"同一个项目两套依赖"。
+    无显式依赖时按计划开始时间顺序构造 FS 链——这是让 CPM 可计算的兜底，
+    但会在结果里标记 `implicit_chain=True`，提醒补真实依赖。
+    """
+    items: list[WbsItem] = list(
+        db.scalars(
+            select(WbsItem).where(WbsItem.project_id == project_id)
+            .order_by(WbsItem.sort_order, WbsItem.id)
+        ).all()
+    )
+    parent_ids = {i.parent_id for i in items if i.parent_id}
+    leaves = [i for i in items if i.id not in parent_ids]
+    by_id = {i.id: i for i in leaves}
+
+    deps = list(db.scalars(select(TaskDependency)
+                           .where(TaskDependency.project_id == project_id)).all())
+    implicit = False
+    if not deps and len(leaves) > 1:
+        ordered = sorted(leaves, key=lambda x: (x.plan_start or dt.date.max, x.sort_order, x.id))
+        for a, b in zip(ordered, ordered[1:]):
+            deps.append(TaskDependency(project_id=project_id, predecessor_id=a.id,
+                                       successor_id=b.id, dep_type="FS", lag_days=0))
+        implicit = True
+    deps = [d for d in deps if d.predecessor_id in by_id and d.successor_id in by_id]
+    return {"items": items, "leaves": leaves, "deps": deps,
+            "implicit_chain": implicit, "by_id": by_id}
+
+
+def task_duration(it: WbsItem) -> int:
+    """任务工期（天）：优先用计划起止，其次 duration_days，最后默认值。"""
+    if it.plan_start and it.plan_end:
+        return max((it.plan_end - it.plan_start).days, 1)
+    if it.duration_days:
+        return max(it.duration_days, 1)
+    return DEFAULT_DURATION
+
+
+def compute_cpm(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
+    """关键路径法（纯函数）：前推 ES/EF、后推 LS/LF、总时差与关键集合。
+
+    nodes: [{id, duration}]（duration 单位：天，>=1）
+    edges: [{pred, succ, dep_type: FS/SS/FF/SF, lag}]
+
+    为什么抽成纯函数：变更影响分析需要在"不改动原计划"的前提下，对**改动后的工期**
+    重算一遍 CPM。若直接复用会写回 ORM 的版本，模拟就会污染正式计划——
+    而"模拟不覆盖基线"本身就是这个功能的前提。同时保证全系统只有一份 CPM 实现。
+    """
+    ids = [n["id"] for n in nodes]
+    dur = {n["id"]: max(int(n.get("duration") or 1), 1) for n in nodes}
+    preds: dict[Any, list[dict]] = {}
+    succs: dict[Any, list[dict]] = {}
+    for e in edges:
+        if e["pred"] in dur and e["succ"] in dur:
+            preds.setdefault(e["succ"], []).append(e)
+            succs.setdefault(e["pred"], []).append(e)
+
+    indeg = {i: 0 for i in ids}
+    for e in edges:
+        if e["succ"] in indeg and e["pred"] in dur:
+            indeg[e["succ"]] += 1
+    queue = [i for i in ids if indeg[i] == 0]
+    order: list[Any] = []
+    while queue:
+        nid = queue.pop(0)
+        order.append(nid)
+        for e in succs.get(nid, []):
+            indeg[e["succ"]] -= 1
+            if indeg[e["succ"]] == 0:
+                queue.append(e["succ"])
+    for i in ids:  # 环形依赖兜底：保证每个节点都被排到
+        if i not in order:
+            order.append(i)
+
+    ES: dict[Any, int] = {}
+    EF: dict[Any, int] = {}
+    for nid in order:
+        es = 0
+        for e in preds.get(nid, []):
+            p = e["pred"]
+            if e.get("dep_type", "FS") == "FS":
+                es = max(es, EF.get(p, 0) + e.get("lag", 0))
+            elif e.get("dep_type") == "SS":
+                es = max(es, ES.get(p, 0) + e.get("lag", 0))
+            elif e.get("dep_type") == "FF":
+                es = max(es, EF.get(p, 0) + e.get("lag", 0) - dur[nid])
+            else:  # SF
+                es = max(es, ES.get(p, 0) + e.get("lag", 0) - dur[nid])
+        ES[nid] = max(es, 0)
+        EF[nid] = ES[nid] + dur[nid]
+
+    total = max(EF.values()) if EF else 0
+
+    LS: dict[Any, int] = {}
+    LF: dict[Any, int] = {}
+    for nid in reversed(order):
+        succ = succs.get(nid, [])
+        if not succ:
+            LF[nid] = total
+        else:
+            lf = total
+            for e in succ:
+                q = e["succ"]
+                if e.get("dep_type", "FS") == "FS":
+                    lf = min(lf, LS.get(q, total) - e.get("lag", 0))
+                elif e.get("dep_type") == "SS":
+                    lf = min(lf, LS.get(q, 0) - e.get("lag", 0) + dur[nid])
+                else:
+                    lf = min(lf, LS.get(q, total) - e.get("lag", 0) + dur[nid])
+            LF[nid] = lf
+        LS[nid] = LF[nid] - dur[nid]
+
+    slack = {nid: max(LS.get(nid, 0) - ES.get(nid, 0), 0) for nid in ids}
+    critical = [nid for nid in ids if slack[nid] == 0]
+    return {"es": ES, "ef": EF, "ls": LS, "lf": LF, "total": total,
+            "slack": slack, "critical": set(critical), "order": order}
+
+
 def compute_critical_path(db: Session, project_id: int) -> dict[str, Any]:
     """对项目全部 WBS 叶子任务执行前推/后推，计算关键路径与总时差。
 
@@ -68,12 +188,8 @@ def compute_critical_path(db: Session, project_id: int) -> dict[str, Any]:
       project_duration_days: int
       basis: 计算依据说明
     """
-    items: list[WbsItem] = list(
-        db.scalars(
-            select(WbsItem).where(WbsItem.project_id == project_id).order_by(WbsItem.sort_order, WbsItem.id)
-        ).all()
-    )
-    if not items:
+    net = build_network(db, project_id)
+    if not net["items"]:
         return {
             "tasks": [],
             "critical_path": [],
@@ -82,39 +198,18 @@ def compute_critical_path(db: Session, project_id: int) -> dict[str, Any]:
             "data_sufficient": False,
         }
 
-    # 只对叶子任务做网络计算（叶子 = 没有子节点的 WBS 项）
-    parent_ids = {i.parent_id for i in items if i.parent_id}
-    leaves = [i for i in items if i.id not in parent_ids]
-
-    by_code = {i.wbs_code: i for i in leaves}
-    by_id = {i.id: i for i in leaves}
-
-    deps = list(
-        db.scalars(select(TaskDependency).where(TaskDependency.project_id == project_id)).all()
-    )
-
-    # 若没有显式依赖，按 WBS 顺序构造 FS 链（保证可计算，并注明依据）
-    implicit_chain = False
-    if not deps and len(leaves) > 1:
-        ordered = sorted(leaves, key=lambda x: (x.plan_start or dt.date.max, x.sort_order, x.id))
-        for a, b in zip(ordered, ordered[1:]):
-            deps.append(TaskDependency(project_id=project_id, predecessor_id=a.id, successor_id=b.id,
-                                       dep_type="FS", lag_days=0))
-        implicit_chain = True
+    leaves, deps = net["leaves"], net["deps"]
+    by_id = net["by_id"]
+    implicit_chain = net["implicit_chain"]
 
     preds: dict[int, list[TaskDependency]] = {}
     succs: dict[int, list[TaskDependency]] = {}
     for d in deps:
-        if d.predecessor_id in by_id and d.successor_id in by_id:
-            preds.setdefault(d.successor_id, []).append(d)
-            succs.setdefault(d.predecessor_id, []).append(d)
+        preds.setdefault(d.successor_id, []).append(d)
+        succs.setdefault(d.predecessor_id, []).append(d)
 
     def dur(it: WbsItem) -> int:
-        if it.plan_start and it.plan_end:
-            return max((it.plan_end - it.plan_start).days, 1)
-        if it.duration_days:
-            return max(it.duration_days, 1)
-        return DEFAULT_DURATION
+        return task_duration(it)
 
     # 拓扑排序（Kahn）
     indeg = {i.id: 0 for i in leaves}
@@ -134,49 +229,19 @@ def compute_critical_path(db: Session, project_id: int) -> dict[str, Any]:
         if i.id not in order:
             order.append(i.id)
 
-    ES: dict[int, int] = {}
-    EF: dict[int, int] = {}
-    for nid in order:
-        es = 0
-        for d in preds.get(nid, []):
-            p_ef = EF.get(d.predecessor_id, 0)
-            if d.dep_type == "FS":
-                es = max(es, p_ef + d.lag_days)
-            elif d.dep_type == "SS":
-                es = max(es, ES.get(d.predecessor_id, 0) + d.lag_days)
-            elif d.dep_type == "FF":
-                es = max(es, p_ef + d.lag_days - dur(by_id[nid]))
-            else:  # SF
-                es = max(es, ES.get(d.predecessor_id, 0) + d.lag_days - dur(by_id[nid]))
-        ES[nid] = max(es, 0)
-        EF[nid] = ES[nid] + dur(by_id[nid])
-
-    total = max(EF.values()) if EF else 0
-
-    LS: dict[int, int] = {}
-    LF: dict[int, int] = {}
-    for nid in reversed(order):
-        succ = succs.get(nid, [])
-        if not succ:
-            LF[nid] = total
-        else:
-            lf = total
-            for d in succ:
-                s_ls = LS.get(d.successor_id, total)
-                if d.dep_type == "FS":
-                    lf = min(lf, s_ls - d.lag_days)
-                elif d.dep_type == "SS":
-                    lf = min(lf, LS.get(d.successor_id, 0) - d.lag_days + dur(by_id[nid]))
-                else:
-                    lf = min(lf, LS.get(d.successor_id, total) - d.lag_days + dur(by_id[nid]))
-            LF[nid] = lf
-        LS[nid] = LF[nid] - dur(by_id[nid])
+    # 用共享的纯函数 CPM 计算，避免与变更模拟各写一套前推/后推
+    nodes = [{"id": i.id, "duration": dur(i)} for i in leaves]
+    edges = [{"pred": d.predecessor_id, "succ": d.successor_id,
+              "dep_type": d.dep_type, "lag": d.lag_days or 0} for d in deps]
+    cpm = compute_cpm(nodes, edges)
+    ES, EF, LS, LF = cpm["es"], cpm["ef"], cpm["ls"], cpm["lf"]
+    total = cpm["total"]
 
     tasks_out = []
     critical_codes = []
     for i in leaves:
-        slack = max((LS.get(i.id, 0) - ES.get(i.id, 0)), 0)
-        is_critical = slack == 0
+        slack = cpm["slack"].get(i.id, 0)
+        is_critical = i.id in cpm["critical"]
         if is_critical:
             critical_codes.append(i.wbs_code)
         # 回写计算结果，供甘特图直接读取
