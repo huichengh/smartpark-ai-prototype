@@ -439,6 +439,201 @@ def ai_project_manager(db: DbSession, auth: CurrentAuth, project_id: int) -> dic
 
 @router.get("/daily-insight")
 def daily_insight(db: DbSession, auth: CurrentAuth, park_id: int | None = None) -> dict[str, Any]:
+    """AI 今日洞察：跨模块汇总当日最值得关注的事项。
+
+    返回的 conclusion / signals / suggestions 是前端「AI 每日洞察」面板真正渲染的字段。
+    之前只返回 items，前端读 conclusion 永远是 undefined，于是整块显示"暂无洞察结论"。
+    现在：规则先给出兜底结论；大模型可用时由它基于同一批 items 重写结论与建议。
+    """
+    auth.require("ai", "AI")
+    items = orch.build_daily_insights(db, auth, park_id=park_id)
+    level_rank = {"CRITICAL": 0, "RISK": 1, "WARNING": 2, "INFO": 3}
+    items.sort(key=lambda x: level_rank.get(str(x.get("level")), 9))
+
+    total = len(items)
+    critical = [i for i in items if i.get("level") == "CRITICAL"]
+    risk = [i for i in items if i.get("level") == "RISK"]
+
+    if total == 0:
+        conclusion = "当前授权范围内的经营数据没有触发任何预警，整体运行平稳。"
+    elif critical:
+        conclusion = (f"今日共 {total} 条洞察，其中 {len(critical)} 条需要立即处理；"
+                      f"最高优先级：{critical[0].get('title')}。")
+    elif risk:
+        conclusion = (f"今日 {total} 条洞察，{len(risk)} 条为风险项；"
+                      f"建议优先看：{risk[0].get('title')}。")
+    else:
+        conclusion = f"今日 {total} 条洞察，均为提示性信息，可按常规节奏跟进。"
+
+    signals = [{"text": i.get("title"), "level": str(i.get("level", "INFO")).lower(),
+                "detail": i.get("detail")} for i in items[:6]]
+    suggestions = [i.get("suggestion") for i in items[:4] if i.get("suggestion")]
+
+    model_mode = "rule"
+    if llm_client.enabled() and items:
+        try:
+            out = llm_client.daily_insight(items)
+            if out.get("结论"):
+                conclusion = out["结论"]
+            if out.get("建议"):
+                suggestions = [str(x) for x in out["建议"]][:4]
+            model_mode = "llm"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("每日洞察的大模型生成失败，使用规则结论：%s", exc)
+
+    return {
+        "conclusion": conclusion,
+        "signals": signals,
+        "suggestions": suggestions,
+        "items": items,
+        "total": total,
+        "model_mode": model_mode,
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "severity_count": {k: len([i for i in items if i.get("level") == k])
+                           for k in ["CRITICAL", "RISK", "WARNING", "INFO"]},
+    }
+
+
+@router.post("/recommendations/{rec_id}/adopt")
+def adopt_recommendation(rec_id: int, db: DbSession, auth: CurrentAuth,
+                         note: str | None = None) -> dict[str, Any]:
+    """采纳 AI 建议。
+
+    L3 高影响建议不会被直接执行，而是转成「审批请求」——符合第 37 节要求：
+    高风险动作必须人工审批，AI 不得自行执行。
+    """
+    auth.require("ai", "AI")
+    r = db.get(AIRecommendation, rec_id)
+    if not r:
+        raise HTTPException(404, "建议不存在")
+    if r.status not in ("NEW", "PENDING"):
+        raise HTTPException(400, f"该建议当前状态为「{r.status}」，不可重复采纳")
+
+    r.status = "ADOPTED"
+    r.decision_status = "已采纳"
+    if note:
+        r.detail = (r.detail or "") + f"\n[采纳备注] {note}"
+
+    approval_code = None
+    if r.permission_level == "L3":
+        now = dt.datetime.now()
+        seq = (db.scalar(select(func.count(ApprovalRequest.id))) or 0) + 1
+        ar = ApprovalRequest(
+            approval_code=f"AP{now:%Y%m%d}{seq:05d}",
+            approval_type=_approval_type_of(r.category),
+            title=f"[AI建议转审批] {r.title}",
+            park_id=r.park_id,
+            related_object_type=r.related_object_type,
+            related_object_id=r.related_object_id,
+            content=(f"AI 建议：{r.title}\n{r.detail or r.summary or ''}\n"
+                     f"建议措施：{r.suggestion or '未给出'}\n"
+                     f"证据链：{r.evidence}"),
+            ai_analysis=r.evidence,
+            risk_level=r.severity,
+            urgency="HIGH" if r.severity in ("HIGH", "CRITICAL") else "MEDIUM",
+            status="PENDING", current_step=1, total_steps=2,
+            applicant_id=auth.user.id, applicant_name=auth.user.real_name,
+            apply_at=now, is_ai_generated=True, source="AI",
+            remark=f"由 AI 建议 {r.rec_code} 转化的高影响动作，"
+                   f"必须人工审批后方可执行（AI 不会自行执行）",
+        )
+        db.add(ar)
+        db.flush()
+        db.add(ApprovalStep(approval_id=ar.id, step_no=1, step_name="业务负责人复核",
+                            approver_role="PARK_MANAGER", status="PENDING"))
+        db.add(ApprovalStep(approval_id=ar.id, step_no=2, step_name="集团审批",
+                            approver_role="GROUP_ADMIN", status="WAITING"))
+        approval_code = ar.approval_code
+        r.decision_status = "待审批"
+        r.status = "PENDING_APPROVAL"
+    elif r.permission_level == "L2":
+        r.decision_status = "已采纳（分析建议）"
+    else:
+        r.decision_status = "已查阅（信息提示）"
+
+    write_audit(db, module="ai", action="AI", auth=auth, object_type="AIRecommendation",
+                object_id=r.id, object_name=r.rec_code,
+                before_value={"status": "NEW"},
+                after_value={"status": r.status, "approval_code": approval_code},
+                change_summary=(f"采纳 AI 建议「{r.title}」"
+                                + (f"，已转为审批单 {approval_code}"
+                                   f"（L{r.permission_level[-1]} 高影响动作，需人工审批）"
+                                   if approval_code else "（L2 分析建议，无需审批）")),
+                source="AI")
+    db.commit()
+    return {
+        "success": True,
+        "message": (f"建议已采纳，并生成审批单 {approval_code}，须经人工审批后方可执行"
+                    f"（AI 不执行高影响动作）"
+                    if approval_code else "建议已采纳，请按建议措施落实"),
+        "status": r.status, "decision_status": r.decision_status,
+        "approval_code": approval_code, "permission_level": r.permission_level,
+        "suggestion": r.suggestion, "action_label": r.action_label,
+        "action_route": r.action_route,
+    }
+
+
+def _approval_type_of(category: str | None) -> str:
+    m = {
+        "招商": "CONTRACT", "合同": "CONTRACT", "财务": "PAYMENT", "催收": "PAYMENT",
+        "空间": "SPACE", "企业": "ENTERPRISE", "项目": "CHANGE",
+        "物业": "OTHER", "设备": "DEVICE_SCRAP", "能源": "OTHER",
+        "安全": "OTHER", "政策": "POLICY",
+    }
+    return m.get(category or "", "OTHER")
+
+
+@router.post("/recommendations/{rec_id}/reject")
+def reject_recommendation(rec_id: int, db: DbSession, auth: CurrentAuth,
+                          reason: str | None = None) -> dict[str, Any]:
+    auth.require("ai", "AI")
+    r = db.get(AIRecommendation, rec_id)
+    if not r:
+        raise HTTPException(404, "建议不存在")
+    r.status = "REJECTED"
+    r.decision_status = "已驳回"
+    if reason:
+        r.detail = (r.detail or "") + f"\n[驳回原因] {reason}"
+    write_audit(db, module="ai", action="AI", auth=auth, object_type="AIRecommendation",
+                object_id=r.id, object_name=r.rec_code,
+                after_value={"status": "REJECTED"},
+                change_summary=f"驳回 AI 建议「{r.title}」：{reason or '无说明'}",
+                source="AI")
+    db.commit()
+    return {"success": True, "message": "建议已驳回"}
+
+
+@router.get("/pm/{project_id}")
+def ai_project_manager(db: DbSession, auth: CurrentAuth, project_id: int) -> dict[str, Any]:
+    """AI 项目经理：项目体检 + 结构化输出（含证据链与决策状态）。"""
+    auth.require("ai", "AI")
+    from app.core.audit import write_audit as _wa
+    from app.models import Project
+
+    p = db.get(Project, project_id)
+    if not p:
+        raise HTTPException(404, "项目不存在")
+    if not auth.can_access_park(p.park_id):
+        raise HTTPException(403, "无权访问该项目数据")
+    if not auth.can_access_project(project_id):
+        raise HTTPException(403, "您的项目数据权限不包含该项目")
+
+    result = orch.answer(db, auth, f"分析项目 {p.project_name} 的健康状况与风险",
+                         project_id=project_id, forced_agent="project")
+    _wa(db, module="ai", action="AI", auth=auth, object_type="Project",
+        object_id=project_id, object_name=p.project_name,
+        change_summary=f"AI 项目经理体检：{p.project_name}"
+                       f"（数据充分性：{'充分' if result.get('data_sufficient') else '不足'}）",
+        source="AI")
+    db.commit()
+    return {**result, "project": {"id": p.id, "project_code": p.project_code,
+                                  "project_name": p.project_name,
+                                  "management_method": p.management_method},
+            "data_label": "演示数据"}
+
+
+@router.get("/daily-insight")
+def daily_insight(db: DbSession, auth: CurrentAuth, park_id: int | None = None) -> dict[str, Any]:
     """AI 今日洞察：跨模块汇总当日最值得关注的事项。"""
     auth.require("ai", "AI")
     items = orch.build_daily_insights(db, auth, park_id=park_id)

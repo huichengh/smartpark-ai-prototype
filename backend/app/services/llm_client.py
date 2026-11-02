@@ -91,14 +91,41 @@ def _annotation_to_schema(ann: Any) -> dict[str, Any]:
     return {"type": "string"}
 
 
-def tool_schemas(limit: int = MAX_TOOLS_IN_PROMPT) -> list[dict[str, Any]]:
+def _bigrams(text: str) -> set[str]:
+    t = re.sub(r"[\s\W_]+", "", text or "")
+    return {t[i:i + 2] for i in range(len(t) - 1)} if len(t) > 1 else {t}
+
+
+def pick_tool_names(question: str, limit: int = 8) -> list[str]:
+    """按问题相关度挑工具。
+
+    25 个工具的 schema 全塞给 4B 模型，光提示词就要处理上千 token——
+    在 CPU 上直接吃到超时。这里先用字二元组算重合度，只把最相关的几个给模型，
+    既快也不会让模型在二十多个函数里选错。
+    """
+    q = _bigrams(question)
+    scored: list[tuple[float, str]] = []
+    for name, entry in TOOL_REGISTRY.items():
+        text = f"{name} {entry.get('description') or ''} {' '.join(entry.get('tables') or [])}"
+        overlap = len(q & _bigrams(text))
+        # 名字里直接出现问题关键词的，额外加权
+        bonus = sum(1 for w in q if len(w) == 2 and w in name)
+        scored.append((overlap + bonus * 2, name))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picked = [n for score, n in scored[:limit] if score > 0]
+    return picked or [n for _, n in scored[:limit]]
+
+
+def tool_schemas(limit: int = MAX_TOOLS_IN_PROMPT,
+                 names: list[str] | None = None) -> list[dict[str, Any]]:
     """把注册表里的工具转成 OpenAI function calling 定义。
 
     跳过 `db` / `auth`（由 call_tool 注入）和 `kw`（原始问句，由我们透传）：
     这些都该由运行时决定，让模型填只会增加填错的概率。
     """
     out: list[dict[str, Any]] = []
-    for name, entry in list(TOOL_REGISTRY.items())[:limit]:
+    picked = [(k, TOOL_REGISTRY[k]) for k in (names or list(TOOL_REGISTRY)) if k in TOOL_REGISTRY]
+    for name, entry in picked[:limit]:
         fn: Callable = entry["fn"]
         try:
             sig = inspect.signature(fn)
@@ -149,6 +176,9 @@ def _chat(messages: list[dict], tools: list[dict] | None = None,
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    # Ollama 专有字段：让模型在多轮之间常驻内存，否则每次都要重新加载（CPU 上要几十秒）
+    if "11434" in config()["base_url"]:
+        payload["keep_alive"] = "30m"
     return _post(payload)
 
 
@@ -195,7 +225,7 @@ def run(db: Session, auth: AuthContext, question: str,
     """
     from app.agent.orchestrator import DecisionStatus, _block
 
-    tools = tool_schemas()
+    tools = tool_schemas(names=pick_tool_names(question))
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -282,6 +312,37 @@ def run(db: Session, auth: AuthContext, question: str,
         },
         "model_mode": "llm",
     }
+
+
+def daily_insight(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """让模型基于当天洞察条目写"今日结论 + 建议"。
+
+    注意这里**不再调工具**：条目本身已经是工具产出的结果，
+    模型只做归纳与措辞，避免为了写一段话再跑一遍全量取数。
+    """
+    compact = [{
+        "标题": i.get("title"),
+        "详情": (i.get("detail") or "")[:140],
+        "级别": i.get("level"),
+        "已有建议": i.get("suggestion"),
+    } for i in items[:8]]
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            "以下是系统今天生成的洞察条目（JSON）：\n"
+            + json.dumps(compact, ensure_ascii=False)
+            + "\n\n请写一段今日经营结论（不超过 80 字，点名最关键的一条，"
+              "不得出现条目里没有的数字），并给 3 条以内可执行建议。"
+              "只输出 JSON：{\"结论\": \"...\", \"建议\": [\"...\"]}"
+        )},
+    ]
+    data = _chat(messages, tools=None, temperature=0.3)
+    content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    try:
+        return json.loads(_strip_json(content))
+    except json.JSONDecodeError:
+        return {"结论": content.strip()[:120]}
 
 
 def status() -> dict[str, Any]:

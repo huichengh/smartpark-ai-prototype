@@ -50,22 +50,50 @@ def alerts(db: DbSession, auth: CurrentAuth, park_id: int | None = None,
     sev_rank = {"CRITICAL": 0, "RISK": 1, "WARNING": 2, "INFO": 3}
     alln.sort(key=lambda n: (sev_rank.get(n.severity, 9),
                              -(n.occurred_at.timestamp() if n.occurred_at else 0)))
+
+    # 同一条规则在每个园区各生成一条通知，原样平铺会出现"账单逾期提醒"连刷好几行。
+    # 按 notice_type 合并成一行并带上条数，标题只出现一次，读起来才是"几件事"而不是"几条记录"。
+    merged: dict[str, dict[str, Any]] = {}
+    for n in alln:
+        key = n.notice_type or n.title or f"#{n.id}"
+        cur = merged.get(key)
+        if cur is None:
+            merged[key] = {
+                "id": n.id, "notice_code": n.notice_code, "notice_type": n.notice_type,
+                "title": n.title, "content": n.content, "severity": n.severity,
+                "trigger_value": n.trigger_value, "threshold": n.threshold,
+                "suggestion": n.suggestion, "action_route": n.action_route,
+                "park_id": n.park_id, "related_object_type": n.related_object_type,
+                "related_object_id": n.related_object_id,
+                "related_object_name": n.related_object_name,
+                "related_module": n.related_module, "action_label": n.action_label,
+                "occurred_at": n.occurred_at.isoformat() if n.occurred_at else None,
+                "deadline": n.deadline.isoformat() if n.deadline else None,
+                "is_read": n.is_read, "is_handled": n.is_handled,
+                "count": 1,
+            }
+        else:
+            cur["count"] += 1
+            # 保留最严重的那条作为代表
+            if sev_rank.get(n.severity, 9) < sev_rank.get(cur["severity"], 9):
+                cur.update({
+                    "severity": n.severity, "content": n.content,
+                    "trigger_value": n.trigger_value, "threshold": n.threshold,
+                    "suggestion": n.suggestion,
+                    "occurred_at": n.occurred_at.isoformat() if n.occurred_at else cur["occurred_at"],
+                })
+
+    items = list(merged.values())
+    items.sort(key=lambda x: sev_rank.get(x["severity"], 9))
     return {
         "my_unread": len(unread),
-        "items": [{
-            "id": n.id, "notice_code": n.notice_code, "notice_type": n.notice_type,
-            "title": n.title, "content": n.content, "severity": n.severity,
-            "trigger_value": n.trigger_value, "threshold": n.threshold,
-            "suggestion": n.suggestion, "action_route": n.action_route,
-            "park_id": n.park_id, "related_object_type": n.related_object_type,
-            "related_object_id": n.related_object_id,
-            "related_object_name": n.related_object_name,
-            "related_module": n.related_module, "action_label": n.action_label,
-            "occurred_at": n.occurred_at.isoformat() if n.occurred_at else None,
-            "deadline": n.deadline.isoformat() if n.deadline else None,
-            "is_read": n.is_read, "is_handled": n.is_handled,
-        } for n in alln[:limit]],
-        "severity_count": {k: len([n for n in alln if n.severity == k])
+        "total": len(items),
+        "raw_count": len(alln),
+        "items": [
+            {**x, "occurred_at": x.get("occurred_at")}
+            for x in items[:limit]
+        ],
+        "severity_count": {k: len([x for x in items if x["severity"] == k])
                            for k in ["CRITICAL", "RISK", "WARNING", "INFO"]},
         "basis": "预警来源：系统规则引擎按业务阈值自动生成，触发值与阈值均随记录一并展示",
         "data_label": "演示数据",

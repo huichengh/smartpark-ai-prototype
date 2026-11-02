@@ -524,47 +524,89 @@ export default function Dashboard() {
               }
               return (
                 <div className="space-y-2">
-                  {list.slice(0, 6).map((a, i) => (
-                    <div
-                      key={i}
-                      className={cx(
-                        'flex items-start gap-3 rounded-lg border px-3 py-2.5 transition',
-                        a.severity === 'HIGH' || a.severity === 'CRITICAL' || a.level === 'danger'
-                          ? 'border-state-danger/28 bg-state-danger/[0.07]'
-                          : a.severity === 'MEDIUM' || a.level === 'warn'
-                            ? 'border-state-warn/28 bg-state-warn/[0.07]'
-                            : 'border-white/8 bg-white/[0.03]',
-                      )}
-                    >
-                      <span
+                  {list.slice(0, 6).map((a, i) => {
+                    // 接口返回的是 content / related_module / trigger_value 等字段，
+                    // 原来按 description / module 取，全都取不到，于是每行只剩一个标题。
+                    const detail = a.content || a.description || ''
+                    const module = a.related_module || a.module
+                    const sev = a.severity || (a.level === 'danger' ? 'CRITICAL' : 'INFO')
+                    const tone = sev === 'CRITICAL' ? 'danger' : sev === 'RISK' ? 'warn' : 'info'
+                    const sevLabel = sev === 'CRITICAL' ? '紧急' : sev === 'RISK' ? '风险' : sev === 'WARNING' ? '提醒' : '提示'
+                    return (
+                      <div
+                        key={a.id ?? i}
                         className={cx(
-                          'mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full',
-                          a.severity === 'HIGH' || a.severity === 'CRITICAL'
-                            ? 'bg-state-danger'
-                            : a.severity === 'MEDIUM'
-                              ? 'bg-state-warn'
-                              : 'bg-brand-400',
+                          'rounded-lg border px-3 py-2.5 transition',
+                          sev === 'CRITICAL'
+                            ? 'border-state-danger/28 bg-state-danger/[0.07]'
+                            : sev === 'RISK'
+                              ? 'border-state-warn/28 bg-state-warn/[0.07]'
+                              : 'border-white/8 bg-white/[0.03]',
                         )}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[13px] text-slate-200">{a.title ?? a.label}</p>
-                        {a.description && (
-                          <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
-                            {a.description}
-                          </p>
-                        )}
-                        <div className="mt-1 flex flex-wrap items-center gap-2">
-                          {a.module && <Tag>{a.module}</Tag>}
-                          {a.count != null && <Tag tone="info">{`${a.count} 项`}</Tag>}
+                      >
+                        <div className="flex items-start gap-2">
+                          <span
+                            className={cx(
+                              'mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full',
+                              sev === 'CRITICAL' ? 'bg-state-danger'
+                                : sev === 'RISK' ? 'bg-state-warn' : 'bg-brand-400',
+                            )}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="text-[13px] leading-snug text-slate-200">
+                                {a.title ?? a.label}
+                              </p>
+                              <span className="flex shrink-0 items-center gap-1">
+                                {a.count > 1 && <Tag tone="info">{`${a.count} 条`}</Tag>}
+                                <Tag tone={tone as any}>{sevLabel}</Tag>
+                              </span>
+                            </div>
+
+                            {detail && (
+                              <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-slate-500">
+                                {detail}
+                              </p>
+                            )}
+
+                            {/* 合并了多条时，触发值/阈值属于其中某一条，展示出来会误导，
+                                改为只给条数；单条时才显示具体数值 */}
+                            {a.count <= 1 && (a.trigger_value != null || a.threshold != null) && (
+                              <p className="mt-1 font-num text-[11px] text-slate-400">
+                                当前 {a.trigger_value ?? '—'} / 阈值 {a.threshold ?? '—'}
+                              </p>
+                            )}
+                            {a.count > 1 && (
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                共 {a.count} 条记录触发同一规则，建议按园区分别处理
+                              </p>
+                            )}
+
+                            {a.suggestion && (
+                              <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                                <span className="text-slate-500">建议：</span>{a.suggestion}
+                              </p>
+                            )}
+
+                            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+                              {module && <Tag tone="muted">{module}</Tag>}
+                              {a.related_object_name && <span>{a.related_object_name}</span>}
+                              {a.occurred_at && <span>{String(a.occurred_at).slice(5, 16).replace('T', ' ')}</span>}
+                              {a.action_route && (
+                                <button
+                                  type="button"
+                                  onClick={() => nav(a.action_route)}
+                                  className="ml-auto rounded border border-brand-400/40 px-1.5 py-0.5 text-brand-300 transition hover:bg-brand-500/12"
+                                >
+                                  {a.action_label || '去处理'} ›
+                                </button>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
-                      {a.link && (
-                        <Btn size="sm" variant="ghost" onClick={() => nav(a.link)}>
-                          处理
-                        </Btn>
-                      )}
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )
             })()
@@ -580,7 +622,11 @@ export default function Dashboard() {
               </Tag>
             </span>
           }
-          subtitle="基于当前园区数据自动生成"
+          subtitle={
+            insight.data
+              ? `基于当前园区数据自动生成 · ${insight.data.model_mode === 'llm' ? '大模型生成' : '规则生成'}`
+              : '基于当前园区数据自动生成'
+          }
           icon={<Sparkles size={15} />}
         >
           {insight.loading ? (
