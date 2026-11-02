@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -19,6 +20,9 @@ from sqlalchemy import func, select
 from app.agent import orchestrator as orch
 from app.core.audit import write_audit
 from app.core.security import CurrentAuth, DbSession
+from app.services import llm_client
+
+logger = logging.getLogger(__name__)
 from app.models import (
     AIConversation,
     AIMessage,
@@ -89,9 +93,24 @@ def list_agents() -> dict[str, Any]:
 def chat(payload: ChatRequest, db: DbSession, auth: CurrentAuth) -> dict[str, Any]:
     """与 AI 对话：真实调用工具层读库 → 结构化回答 → 落库 + 审计。"""
     auth.require("ai", "AI")
-    result = orch.answer(db, auth, payload.question,
-                         park_id=payload.park_id, project_id=payload.project_id,
-                         forced_agent=payload.agent_key)
+
+    # 大模型路径：能通就用它选工具、写八段式；任何异常都退回规则编排，
+    # 保证演示现场不会因为网络或模型服务挂掉而开天窗。
+    result = None
+    if llm_client.enabled():
+        try:
+            result = llm_client.run(db, auth, payload.question, park_id=payload.park_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("大模型路径失败，回落规则模式：%s: %s", type(exc).__name__, exc)
+            if llm_client.is_forced_llm():
+                raise HTTPException(
+                    502, f"大模型调用失败（AGENT_MODE=llm 不回退）：{type(exc).__name__}: {exc}"
+                ) from exc
+    if result is None:
+        result = orch.answer(db, auth, payload.question,
+                             park_id=payload.park_id, project_id=payload.project_id,
+                             forced_agent=payload.agent_key)
+        result.setdefault("model_mode", "rule")
     response = result.get("response") or {}
 
     now = dt.datetime.now()
@@ -484,3 +503,10 @@ def list_messages(db: DbSession, auth: CurrentAuth,
         "created_at": m.created_at.isoformat() if m.created_at else None,
     } for m in rows]
     return paginate(items, page, page_size)
+
+
+@router.get("/llm/status")
+def llm_status(auth: CurrentAuth) -> dict[str, Any]:
+    """大模型连通性自检：给运维和演示现场一个"到底通没通"的明确答复。"""
+    auth.require("ai", "VIEW")
+    return llm_client.status()

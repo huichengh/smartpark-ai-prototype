@@ -34,8 +34,17 @@ class Settings(BaseSettings):
     BACKEND_HOST: str = os.getenv("BACKEND_HOST", "127.0.0.1")
     BACKEND_PORT: int = int(os.getenv("BACKEND_PORT", "8010"))
 
-    # AI Agent 运行模式：rule（本地确定性推理）/ llm（接入大模型）
-    AGENT_MODE: str = os.getenv("AGENT_MODE", "rule")
+    # AI Agent 运行模式：
+    #   rule  只用本地确定性推理（默认，离线可复现）
+    #   auto  优先调用大模型，失败自动回落规则
+    #   llm   只用大模型，失败直接报错（用于排查模型侧问题）
+    AGENT_MODE: str = os.getenv("AGENT_MODE", "rule").lower()
+
+    # 大模型接入（任何 OpenAI 兼容端点：Ollama / DashScope / 硅基流动 …）
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen3.6:8b")
+    LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "30"))
 
     DEMO_DATA_LABEL: str = "演示数据"
     CORS_ORIGINS: list[str] = ["*"]
