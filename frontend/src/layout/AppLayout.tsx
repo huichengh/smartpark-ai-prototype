@@ -60,7 +60,7 @@ function ParkSwitcher() {
         <ChevronDown size={13} className={cx('transition-transform', open && 'rotate-180')} />
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-40 mt-1.5 min-w-[228px] animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel/95 py-1 shadow-glass backdrop-blur-xl">
+        <div className="absolute left-0 top-full z-40 mt-1.5 min-w-[228px] animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel py-1 shadow-2xl shadow-black/50">
           <button
             onClick={() => {
               setActiveParkId(null)
@@ -166,7 +166,7 @@ function UserMenu() {
         <span className="hidden text-[13px] text-slate-200 sm:block">{user.real_name}</span>
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-40 mt-1.5 w-64 animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel/95 shadow-glass backdrop-blur-xl">
+        <div className="absolute right-0 top-full z-40 mt-1.5 w-64 animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel shadow-2xl shadow-black/50">
           <div className="border-b border-white/8 px-4 py-3">
             <p className="text-sm font-medium text-slate-100">{user.real_name}</p>
             <p className="mt-0.5 font-num text-[11px] text-slate-500">{user.username}</p>
@@ -338,7 +338,7 @@ export function AppLayout() {
 
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">
         {/* 顶栏 */}
-        <header className="flex h-[58px] shrink-0 items-center gap-3 border-b border-white/8 bg-nav-base/70 px-4 backdrop-blur-xl">
+        <header className="relative z-30 flex h-[58px] shrink-0 items-center gap-3 border-b border-white/8 bg-nav-base/70 px-4 backdrop-blur-xl">
           <button
             onClick={() => setMobileOpen(true)}
             className="rounded-lg border border-white/10 bg-white/[0.05] p-2 text-slate-300 lg:hidden"

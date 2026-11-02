@@ -18,6 +18,13 @@ const fmt = (v: any, d = 2) =>
   v == null ? '—' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d })
 
 const wan = (v: any) => `${((Number(v) || 0) / 10000).toFixed(1)} 万`
+/** 金额按量级自动换算：亿元 / 万元。避免出现"20790080 万元"这种读不出量级的写法 */
+const money = (v: any) => {
+  const n = Number(v) || 0
+  if (Math.abs(n) >= 1e8) return `${(n / 1e8).toFixed(2)} 亿`
+  if (Math.abs(n) >= 1e4) return `${(n / 1e4).toFixed(1)} 万`
+  return n.toFixed(0)
+}
 
 const STAGE_TONE: Record<string, string> = {
   LEAD: 'info', FOLLOWING: 'info', VISITED: 'brand' as unknown as string,
@@ -155,7 +162,7 @@ export default function Leasing() {
             tone="ai" hint="签约数 ÷ 线索总数"
           />
           <KpiCard label="需求面积" value={fmt(fs_.total_demand_area, 0)} unit="㎡" />
-          <KpiCard label="意向投资额" value={wan(fs_.total_investment)} unit="元" />
+          <KpiCard label="意向投资额" value={money(fs_.total_investment)} unit="元" hint="意向面积 × 单位投资强度累计" />
           <KpiCard
             label="停滞线索" value={fs_.stagnant_count ?? stagnantCount} unit="条"
             tone={stagnantCount > 0 ? 'warn' : 'ok'} hint="超过 14 天无跟进"

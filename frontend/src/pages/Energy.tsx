@@ -12,7 +12,7 @@ import {
   Btn, DataTable, EmptyState, ErrorState, Field, KpiCard, Loading,
   PageHeader, Panel, Tag, inputCls,
 } from '@/components/ui'
-import { Chart, barOption, lineOption, pieOption } from '@/components/Charts'
+import { Chart, barOption, lineOption, pieOption, rankBarOption } from '@/components/Charts'
 
 const fmt = (v: any, d = 2) =>
   v == null ? '—' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d })
@@ -76,17 +76,24 @@ export default function Energy() {
     })
   }, [s])
 
-  const typeOption = useMemo(
-    () =>
-      pieOption({
-        data: (s?.by_type ?? []).map((x: any) => ({
-          name: ENERGY_TYPE[x.key ?? x.name] ?? (x.name ?? x.key),
-          value: x.value ?? x.consumption ?? x.cost ?? x.count ?? 0,
-        })),
-        centerLabel: { title: '能源成本', value: `${((Number(t.cost) || 0) / 10000).toFixed(1)}万` },
-      }),
-    [s, t],
-  )
+  /**
+   * 各能源类型用量。
+   *
+   * 原来这里是饼图，但 electricity 的单位是 kWh、water 是 m³——把度数和吨数加在
+   * 一起算占比没有业务含义（会得出"用电占 98.53%"这种数字），而副标题还写着
+   * "按成本归集"、环中心写着"能源成本"，三层口径都对不上。
+   * 现在改成横向条形：各类型只跟自己比，单位写进标签，不做跨单位合并。
+   */
+  const typeOption = useMemo(() => {
+    const rows: { label: string; value: number }[] = (s?.by_type ?? []).map((x: any) => ({
+      label: `${ENERGY_TYPE[x.key ?? x.name] ?? (x.name ?? x.key ?? '未知')}（${x.unit ?? '—'}）`,
+      value: Number(x.consumption ?? 0),
+    }))
+    return rankBarOption({
+      names: rows.map((r) => r.label),
+      values: rows.map((r) => r.value),
+    })
+  }, [s])
 
   const buildingOption = useMemo(
     () =>
@@ -175,7 +182,7 @@ export default function Energy() {
 
           {(s.by_type ?? []).length > 0 || (s.by_building ?? []).length > 0 ? (
             <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
-              <Panel title="能源类型构成" subtitle="按成本归集（窗口期）">
+              <Panel title="各能源类型用量" subtitle="单位不同，不做占比合并">
                 <Chart height={300} option={typeOption} empty={(s.by_type ?? []).length === 0} />
               </Panel>
               <div className="xl:col-span-2">

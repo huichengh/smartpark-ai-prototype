@@ -426,9 +426,16 @@ export default function Dashboard() {
                 data: (charts.safety_status_dist ?? [])
                   .filter((d: any) => d.value > 0)
                   .map((d: any) => ({ name: d.name, value: d.value })),
+                // 中心放"已闭环率"而不是安全指数：这张卡的标题是"按处理状态统计"，
+                // 放一个不相干的指标会让人以为闭环率 = 安全指数
                 centerLabel: {
-                  title: '安全指数',
-                  value: summary.safety_score ?? '—',
+                  title: '已闭环率',
+                  value: (() => {
+                    const rows = (charts.safety_status_dist ?? []).filter((d: any) => d.value > 0)
+                    const total = rows.reduce((a: number, b: any) => a + b.value, 0)
+                    const closed = rows.find((d: any) => d.key === 'CLOSED')?.value ?? 0
+                    return total ? `${Math.round((closed / total) * 100)}%` : '—'
+                  })(),
                 },
               })}
             />

@@ -694,7 +694,11 @@ def seed_leads(db: Session, parks: list, channels: list,
                 demand_space_type=random.choice(["OFFICE", "FACTORY", "WAREHOUSE",
                                                  "SHOP", "PUBLIC"]),
                 demand_floor=pick(["1-3F", "4-8F", "9-14F", "不限", "高层"], i),
-                investment_amount=round(random.uniform(500, 60000) * 10000, 2),
+                # 投资规模按"面积 × 单位投资强度"算，而不是随机一个 500 万~6 亿的数。
+                # 原来那个写法让一个 2000 ㎡ 的租户意向投资 3 亿，全量堆出 2079 亿，
+                # 招商页首屏直接显示"20790080 万元"，量级一眼就是错的。
+                # 2000~8000 元/㎡ 对应装修 + 设备投入，符合产业园区实际。
+                investment_amount=round(area * random.uniform(2000, 8000), 2),
                 expected_employees=random.randint(10, 800),
                 expected_settle_date=d(random.randint(-60, 300)),
                 qualification=pick(["意向明确", "已实地考察", "已提供资料", "待确认"], i),

@@ -167,13 +167,17 @@ def finance_summary(db: DbSession, auth: CurrentAuth, park_id: int | None = None
     for ms in [shift(m_start, -i) for i in range(11, -1, -1)]:
         me = shift(ms, 1)
         mb = [b for b in bills if b.bill_date and ms <= b.bill_date < me]
+        receivable = sm(mb, "receivable")
         trend.append({
             "month": f"{ms.year}-{ms.month:02d}",
-            "receivable": sm(mb, "receivable"),
+            "receivable": receivable,
             "received": sm(mb, "received"),
             "arrears": sm(mb, "arrears"),
-            "collection_rate": round(sm(mb, "received") / sm(mb, "receivable") * 100, 2)
-            if sm(mb, "receivable") else 0.0,
+            # 当月还没出账单时应收为 0，收缴率不是 0% 而是"没有数据"。
+            # 之前填 0.0 会让趋势线在最后一个月断崖跌到 0，看起来像收缴崩了。
+            "collection_rate": round(sm(mb, "received") / receivable * 100, 2)
+            if receivable else None,
+            "has_data": receivable > 0,
         })
 
     # 收费类型结构
@@ -188,10 +192,13 @@ def finance_summary(db: DbSession, auth: CurrentAuth, park_id: int | None = None
 
     return {
         "kpi": {
-            "month_receivable": sm(cur, "receivable"),
-            "month_received": sm(cur, "received"),
-            "month_mom": round((sm(cur, "received") - sm(lm, "received"))
-                               / (sm(lm, "received") or 1) * 100, 2),
+            # 本月还没出账单时，应收/实收是"没有数据"而不是 0；
+            # 直接给 0 会连带算出 -100% 环比，首屏看起来像当月收款崩了。
+            "month_receivable": sm(cur, "receivable") if cur else None,
+            "month_received": sm(cur, "received") if cur else None,
+            "month_mom": (round((sm(cur, "received") - sm(lm, "received"))
+                                / (sm(lm, "received") or 1) * 100, 2) if cur else None),
+            "month_has_bills": bool(cur),
             "ytd_receivable": sm(ytd, "receivable"),
             "ytd_received": sm(ytd, "received"),
             "total_arrears": sm(open_bills, "arrears"),

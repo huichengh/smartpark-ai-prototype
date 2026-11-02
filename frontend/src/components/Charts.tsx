@@ -243,7 +243,10 @@ export function funnelOption({
   data: { name: string; value: number; color?: string }[]
 }): EChartsOption {
   return {
-    tooltip: { trigger: 'item', formatter: '{b}<br/>到达 {c} 条' },
+    tooltip: { trigger: 'item', formatter: '{b}<br/>到达 {c} 条（{d}%）' },
+    // 漏斗本身就是"从大到小"的顺序图，每一层都有名字，再加图例只会压在图形上
+    // （图例是 BASE 里的默认样式带出来的，必须显式关掉）
+    legend: { show: false },
     series: [
       {
         type: 'funnel',
@@ -254,7 +257,8 @@ export function funnelOption({
         minSize: '28%',
         sort: 'descending',
         gap: 2,
-        label: { color: '#CBD5E1', fontSize: 11, position: 'inside' },
+        label: { color: '#0B1728', fontSize: 12, fontWeight: 'bold', position: 'inside',
+                 formatter: '{b}  {c}' },
         itemStyle: { borderColor: 'transparent' },
         data: data.map((d, i) => ({
           name: d.name,
