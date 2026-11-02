@@ -48,6 +48,28 @@ import { Chart, barOption, lineOption, pieOption, funnelOption, rankBarOption, R
  * 原样渲染会出现「47640476.88 kWh」这种 8 位数，卡片宽度撑不住，
  * 视频里也读不出量级。百分比、个数类指标保持原样。
  */
+/** KPI 的白话解释：卡片上只留一句人话，计算公式挂到悬停提示里 */
+const KPI_PLAIN: Record<string, string> = {
+  park_count: '你能看到的园区有几个',
+  enterprise_count: '建档企业总数（含意向与已退园）',
+  settle_rate: '已入驻占可容纳的比例',
+  occupancy_rate: '已租面积占可租面积的比例',
+  available_area: '现在能招租的空置面积',
+  lead_count: '手上正在跟的招商线索',
+  conversion_rate: '线索最终签下来的比例',
+  contract_expiring: '90 天内到期的合同数',
+  collection_rate: '应收租金实际收回的比例',
+  arrears_amount: '还没收回来的欠费',
+  work_order_rate: '报修工单处理完的比例',
+  device_online_rate: '设备在线的比例',
+  energy_total: '本月用电量',
+  safety_risk: '还没闭环的安全事件数',
+  project_active: '正在施工的项目数',
+  project_delayed: '拖过计划完工日的项目',
+  budget_execution: '项目预算花了多少',
+  monthly_income: '本月实际收到多少钱',
+}
+
 function scaleKpi(value: any, unit?: string): { v: any; u?: string } {
   if (value == null || typeof value !== 'number') return { v: value ?? '—', u: unit }
   const abs = Math.abs(value)
@@ -171,7 +193,14 @@ export default function Dashboard() {
                 hint={
                   k.target
                     ? `目标 ${k.target}${k.unit ?? ''}`
-                    : undefined
+                    : (k.unavailable_reason || KPI_PLAIN[k.key] || undefined)
+                }
+                // 带目标的指标，卡片上保留"目标"（这是判断好坏的关键信号），
+                // 白话解释和计算口径一起放进悬停，两者都不丢
+                explain={
+                  [KPI_PLAIN[k.key], k.basis,
+                   k.target ? `目标 ${k.target}${k.unit ?? ''}` : '']
+                    .filter(Boolean).join('；')
                 }
               />
             </button>

@@ -199,7 +199,14 @@ function Workspace({ onOpenSandbox, onOpenTab }: {
             )}
           </Panel>
 
-          <Panel title={`续租风险（${risks.length}）`} subtitle="规则标签，非概率">
+          <Panel
+            title={`续租风险（${risks.length}）`}
+            subtitle={
+              <Term explain="这是按规则打的分，不是统计出来的退租概率。没有带标签的历史数据，报一个百分比出来就是编的。">
+                规则标签，非概率
+              </Term>
+            }
+          >
             {riskData.loading ? <Loading inline /> : risks.length === 0 ? (
               <div className="text-sm text-slate-400">暂无中高风险合同</div>
             ) : (
@@ -507,7 +514,22 @@ function Sandbox({ presetSpaceId }: { presetSpaceId?: number | null } = {}) {
         <EmptyState text="还没有推演结果" hint="选择空间或手动填写参数后，点「生成三方案对比」" />
       ) : (
         <>
-          <Panel title="三方案对比" subtitle="净经营贡献 = 租期实收租金 − 佣金 − 装修补贴 − 持有成本">
+          <Panel
+          title="三方案对比"
+          subtitle={
+            <>
+              对比口径：
+              <Term explain="租期实收租金 − 招商佣金 − 装修补贴 − 持有成本。已扣掉为这间房花出去的钱，是真正落袋的部分。">
+                净经营贡献
+              </Term>
+              ；空置期按
+              <Term explain="房子空着这段时间，本来能收却没收到的租金。等得越久，这笔损失越大，所以方案比较时要算进去。">
+                空置机会成本
+              </Term>
+              计入
+            </>
+          }
+        >
             <DataTable<any>
               columns={[
                 { key: 'label', title: '方案' },
@@ -587,7 +609,11 @@ function RiskList() {
     <div className="space-y-4">
       <Panel
         title={`续租风险待核实（${data?.total ?? 0}）`}
-        subtitle="规则标签，不是统计概率；每条结论都能回溯到原始记录"
+        subtitle={
+          <Term explain="每条风险都由到期天数、逾期账单、未闭环工单等具体信号累加得出，可逐条点开看原始记录。">
+            规则标签，不是统计概率；每条结论都能回溯到原始记录
+          </Term>
+        }
       >
         <div className="mb-3 flex flex-wrap gap-2 text-xs">
           {Object.entries(data?.by_level ?? {}).map(([k, v]) => (
