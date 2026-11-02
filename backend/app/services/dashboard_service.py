@@ -347,7 +347,10 @@ def get_dashboard_summary(db: Session, auth: AuthContext, park_id: int | None = 
 
     # ================= 图表数据 =================
     # 招商趋势（近 12 个月新增线索 / 签约）
-    trend_months = [_shift_month(m_start, -i) for i in range(11, -1, -1)]
+    # 趋势只排到「上一个完整月」：当月还没走完，把它画进去只会出现一条
+    # 末尾断崖（例如线索量突然归零），看起来像业务崩了，其实是统计周期没结束。
+    _prev_month = _shift_month(m_start, -1)
+    trend_months = [_shift_month(_prev_month, -i) for i in range(11, -1, -1)]
     lead_trend = []
     for ms in trend_months:
         me = _shift_month(ms, 1)

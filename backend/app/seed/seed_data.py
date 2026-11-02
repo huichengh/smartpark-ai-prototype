@@ -718,6 +718,12 @@ def seed_leads(db: Session, parks: list, channels: list,
                 lost_reason=("租金预算与园区定价差距较大" if stage == "LOST" else None),
                 remark=LABEL,
             )
+            # TimestampMixin 的 created_at/updated_at 默认取 now()，
+            # 不显式回填的话，680 条线索全部落在播种当天——招商趋势图于是
+            # 前 11 个月全是 0、最后一个月突然冒出 680 条，看着像数据坏了。
+            lead.created_at = dt.datetime.combine(created, dt.time(9, 30))
+            lead.updated_at = dt.datetime.combine(
+                lead.stage_entered_at or created, dt.time(15, 0))
             db.add(lead)
             leads.append(lead)
         db.flush()

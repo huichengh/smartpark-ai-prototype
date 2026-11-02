@@ -42,6 +42,23 @@ import {
 import { Chart, barOption, lineOption, pieOption, funnelOption, rankBarOption, RISE, FALL } from '@/components/Charts'
 
 /** KPI 图标按 key 映射（纯展示，不含业务数据） */
+/**
+ * KPI 数值可读化：超过一万的数按「万 / 亿」换算，单位跟着变。
+ *
+ * 原样渲染会出现「47640476.88 kWh」这种 8 位数，卡片宽度撑不住，
+ * 视频里也读不出量级。百分比、个数类指标保持原样。
+ */
+function scaleKpi(value: any, unit?: string): { v: any; u?: string } {
+  if (value == null || typeof value !== 'number') return { v: value ?? '—', u: unit }
+  const abs = Math.abs(value)
+  if (unit === '%' || (unit && unit !== 'kWh' && unit !== '元' && unit !== '㎡')) {
+    return { v: value, u: unit }
+  }
+  if (abs >= 1e8) return { v: (value / 1e8).toFixed(2), u: unit ? `亿 ${unit}` : '亿' }
+  if (abs >= 1e4) return { v: (value / 1e4).toFixed(1), u: unit ? `万 ${unit}` : '万' }
+  return { v: value, u: unit }
+}
+
 const KPI_ICON: Record<string, JSX.Element> = {
   park_count: <Building2 size={15} />,
   enterprise_count: <Users size={15} />,
@@ -145,8 +162,8 @@ export default function Dashboard() {
             >
               <KpiCard
                 label={k.label}
-                value={k.value ?? '—'}
-                unit={k.unit}
+                value={scaleKpi(k.value, k.unit).v}
+                unit={scaleKpi(k.value, k.unit).u}
                 delta={k.mom}
                 deltaLabel="环比"
                 icon={KPI_ICON[k.key] ?? <Activity size={15} />}
@@ -269,8 +286,11 @@ export default function Dashboard() {
             option={pieOption({
               data: (charts.status_dist ?? []).map((d: any) => ({ name: d.name, value: d.value })),
               centerLabel: {
+                // 中心必须等于环内各分段之和。原来取的是 enterprise_settled（在园企业 249），
+                // 而环里画的是全部四种状态（344），中心数和图对不上，看着像算错了。
                 title: '企业总数',
-                value: summary.enterprise_settled ?? (charts.status_dist ?? []).reduce((s: number, x: any) => s + (x.value ?? 0), 0),
+                value: (charts.status_dist ?? []).reduce((s: number, x: any) => s + (x.value ?? 0), 0)
+                  || summary.enterprise_settled || 0,
               },
             })}
           />
