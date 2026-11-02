@@ -38,6 +38,10 @@ from app.seed.reference import (
 )
 
 random.seed(20260917)
+
+#: 演示园区的目标出租率（按可出租面积）。真实产业园区普遍 85~95%，
+#: 取 82% 既贴近现实，又给招商/深陷空置的场景留出约 18% 的空置面积。
+TARGET_OCCUPANCY = 0.82
 TODAY = dt.date.today()
 NOW = dt.datetime.now()
 LABEL = "演示数据"
@@ -506,35 +510,73 @@ def seed_enterprises(db: Session, parks: list) -> list:
 
 def assign_spaces(db: Session, parks: list, enterprises: list,
                   park_spaces: dict) -> None:
+    """把空间分配给入驻企业，并让整体出租率落在真实园区区间。
+
+    为什么改成"按面积目标分配"：原先每家企业只随机拿 1~4 间，344 家企业只能覆盖
+    1457 间里的 494 间，算出来的出租率只有 44%——真实产业园区普遍在 85~95%，
+    44% 的园区在观众眼里是"快撑不住了"，会直接削弱演示可信度。
+
+    现在按园区可出租面积设 82% 的目标：第一轮给每家企业分配主力用房，之后
+    按轮次把剩余空间作为"扩租"分给已有企业，直到面积达标；剩余部分留作空置/洽谈中，
+    既符合真实园区，又给招商沙盘和续租风险留下可演示的素材。
+    """
     by_park: dict = {}
     for e in enterprises:
         by_park.setdefault(e.park_id, []).append(e)
 
     for park in parks:
-        ents = by_park.get(park.id, [])
+        ents = [e for e in by_park.get(park.id, [])
+                if e.status in ("SETTLED", "GROWING")]
         spaces = list(park_spaces.get(park.id, []))
         random.shuffle(spaces)
+        rentable_total = sum(sp.rentable_area or 0 for sp in spaces)
+        target_area = rentable_total * TARGET_OCCUPANCY
+
+        def _assign(sp, e) -> None:
+            sp.enterprise_id = e.id
+            sp.status = "RENTED"
+            sp.leasing_status = "LEASED"
+            sp.vacant_since = None
+            sp.lease_start = e.settle_date
+            sp.lease_end = d(random.randint(60, 1500))
+            e.leased_area = round((e.leased_area or 0) + (sp.area or 0), 2)
+
         idx = 0
+        rented_area = 0.0
+
+        # 第一轮：每家企业拿 1~4 间主力用房
         for e in ents:
-            if e.status not in ("SETTLED", "GROWING"):
-                continue
-            take = random.choices([1, 1, 1, 2, 2, 3, 4], k=1)[0]
-            if idx + take > len(spaces):
+            if idx >= len(spaces):
                 break
-            assigned = spaces[idx:idx + take]
-            idx += take
-            for sp in assigned:
-                sp.enterprise_id = e.id
-                sp.status = "RENTED"
-                sp.leasing_status = "LEASED"
-                sp.vacant_since = None
-                sp.lease_start = e.settle_date
-                sp.lease_end = d(random.randint(60, 1500))
-            e.leased_area = round(sum(x.area for x in assigned), 2)
-        for sp in spaces[idx:idx + max(3, len(spaces) // 12)]:
+            take = random.choices([1, 1, 1, 2, 2, 3, 4], k=1)[0]
+            for sp in spaces[idx:idx + take]:
+                _assign(sp, e)
+                rented_area += sp.rentable_area or 0
+            idx += min(take, len(spaces) - idx)
+
+        # 后续轮次：按面积目标补足，剩余空间作为扩租分给已有企业
+        while rented_area < target_area and idx < len(spaces) and ents:
+            progressed = False
+            for e in ents:
+                if idx >= len(spaces) or rented_area >= target_area:
+                    break
+                sp = spaces[idx]
+                idx += 1
+                _assign(sp, e)
+                rented_area += sp.rentable_area or 0
+                progressed = True
+            if not progressed:
+                break
+
+        # 尾巴上的少量空间留作"洽谈中"，其余为空置
+        for sp in spaces[idx:idx + max(3, len(spaces) // 20)]:
             if sp.enterprise_id is None:
                 sp.leasing_status = "NEGOTIATING"
                 sp.status = "RESERVED"
+        for sp in spaces:
+            if sp.enterprise_id is None and sp.status != "RESERVED":
+                sp.status = "AVAILABLE"
+                sp.leasing_status = "AVAILABLE"
     db.flush()
 
 
