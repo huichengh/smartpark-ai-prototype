@@ -164,7 +164,9 @@ def finance_summary(db: DbSession, auth: CurrentAuth, park_id: int | None = None
         return dt.date(y, m, 1)
 
     trend = []
-    for ms in [shift(m_start, -i) for i in range(11, -1, -1)]:
+    # 只排到上一个完整月：当月尚未结束，作图会出现末尾断崖
+    _prev = shift(m_start, -1)
+    for ms in [shift(_prev, -i) for i in range(11, -1, -1)]:
         me = shift(ms, 1)
         mb = [b for b in bills if b.bill_date and ms <= b.bill_date < me]
         receivable = sm(mb, "receivable")
