@@ -57,3 +57,6 @@ tools/e2e/*.out
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 本地录屏与转码产物（含浏览器凭证、ffmpeg 二进制，禁止入库）
+video/
