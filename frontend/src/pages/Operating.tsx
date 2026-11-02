@@ -14,7 +14,7 @@ import { operatingApi } from '@/api/modules'
 import { useAsync, pushToast } from '@/hooks/useAsync'
 import {
   Btn, DataTable, EmptyState, ErrorState, Field, KpiCard, Loading,
-  PageHeader, Panel, Segmented, Tag, inputCls,
+  PageHeader, Panel, Segmented, Tag, Term, inputCls,
 } from '@/components/ui'
 import { Chart, lineOption } from '@/components/Charts'
 
@@ -27,6 +27,17 @@ const daysLabel = (d: number | null | undefined) => {
   if (d < 0) return `已过期 ${-d} 天`
   if (d === 0) return '今天到期'
   return `剩余 ${d} 天`
+}
+
+
+/** KPI 的白话解释：卡片上只留一句人话，具体算法挂到悬停提示里 */
+const KPI_PLAIN: Record<string, string> = {
+  total_area: '园区能拿来出租的总面积',
+  rented_area: '已签合同、正在使用的面积',
+  vacant_area: '目前空着、可招租的面积',
+  occupancy_rate: '已出租占可出租的比例',
+  annual_rent: '按月租金折算一整年',
+  avg_vacant_days: '空着的空间平均空了多久',
 }
 
 const LEVEL_TONE: Record<string, string> = {
@@ -56,7 +67,7 @@ export default function Operating() {
     <div className="space-y-5">
       <PageHeader
         title="经营决策工作台"
-        desc="以经营目标为中心：先看指标口径，再推演方案，随后处理续租风险，最后把建议推成可验收的任务。"
+        desc="一张屏看完：今天要处理什么、哪块空间能多赚钱、下一步该谁去做。"
         demo
       />
       <Segmented<Tab>
@@ -144,7 +155,8 @@ function Workspace({ onOpenSandbox, onOpenTab }: {
           <KpiCard key={k.key} label={k.label}
                    value={k.value == null ? '—' : fmt(k.value, k.unit === '%' ? 2 : 0)}
                    unit={k.unit}
-                   hint={k.unavailable_reason || k.basis}
+                   hint={k.unavailable_reason || KPI_PLAIN[k.key] || k.basis}
+                   explain={k.basis}
                    tone={k.key === 'occupancy_rate' ? 'brand' : k.key === 'vacant_area' ? 'warn' : undefined} />
         ))}
       </div>
@@ -242,7 +254,10 @@ function Workspace({ onOpenSandbox, onOpenTab }: {
             )}
           </Panel>
 
-          <Panel title="口径说明" subtitle="同一口径在 KPI、沙盘与报表之间保持一致">
+          <Panel
+            title={<Term explain="同一个指标在驾驶舱、沙盘、报表里用的是同一套算法，不会出现三个部门三个数。">口径</Term>}
+            subtitle="每个数字都能说清是怎么算出来的"
+          >
             <ul className="space-y-1 text-xs text-slate-400">
               {(metrics.data?.kpis ?? []).map((k: any) => (
                 <li key={k.key}>· <b className="text-slate-300">{k.label}</b>：{k.basis}</li>
@@ -336,7 +351,8 @@ function Overview() {
             label={k.label}
             value={k.value == null ? '—' : fmt(k.value, k.unit === '%' ? 2 : 0)}
             unit={k.unit}
-            hint={k.unavailable_reason || k.basis}
+            hint={k.unavailable_reason || KPI_PLAIN[k.key] || k.basis}
+            explain={k.basis}
             tone={k.key === 'occupancy_rate' ? 'brand' : k.key === 'vacant_area' ? 'warn' : undefined}
           />
         ))}
