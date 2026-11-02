@@ -321,6 +321,9 @@ def run(db: Session, auth: AuthContext, question: str,
     ]
 
     used: list[dict[str, Any]] = []       # 记录每次工具调用，供 evidence 用
+    # 同一轮问答里重复调用同一工具、同一参数，结果不会变。
+    # 实测模型会连着调 7 次 list_renewal_risks，白花时间也白花花 token。
+    cache: dict[str, dict[str, Any]] = {}
     tool_payloads: list[dict[str, Any]] = []
     tool_payloads_text: list[str] = []
 
@@ -346,8 +349,13 @@ def run(db: Session, auth: AuthContext, question: str,
             args.setdefault("kw", question)
             if park_id is not None:
                 args.setdefault("park_id", park_id)
+            cache_key = f"{fname}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
             try:
-                result = call_tool(fname, db, auth, **args)
+                if cache_key in cache:
+                    result = cache[cache_key]
+                else:
+                    result = call_tool(fname, db, auth, **args)
+                    cache[cache_key] = result
             except Exception as exc:  # noqa: BLE001
                 result = {"error": f"工具执行失败：{exc}", "tool_error": True}
             used.append({"tool": fname, "args": args,
