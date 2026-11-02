@@ -201,7 +201,11 @@ def list_buildings(db: DbSession, auth: CurrentAuth,
             "floor_count": b.floor_count, "underground_floors": b.underground_floors,
             "build_area": b.build_area, "rentable_area": round(area, 2),
             "rented_area": round(rented, 2), "occupancy_rate": occ,
-            "space_count": len(bs), "enterprise_count": len({s.enterprise_id for s in bs if s.enterprise_id}),
+            "space_count": len(bs),
+            # 前端楼栋卡片要显示"已租 / 空置"的间数，之前只给了面积，卡片上一直是破折号
+            "rented_count": len([s for s in bs if s.status == "RENTED"]),
+            "vacant_count": len([s for s in bs if s.status == "AVAILABLE"]),
+            "enterprise_count": len({s.enterprise_id for s in bs if s.enterprise_id}),
             "completion_date": b.completion_date.isoformat() if b.completion_date else None,
             "property_manager": b.property_manager, "status": b.status,
             "map_x": b.map_x, "map_y": b.map_y, "map_w": b.map_w, "map_d": b.map_d, "map_h": b.map_h,
@@ -306,6 +310,12 @@ def space_detail(space_id: int, db: DbSession, auth: CurrentAuth) -> dict[str, A
     f = db.get(Floor, s.floor_id) if s.floor_id else None
     ent = db.get(Enterprise, s.enterprise_id) if s.enterprise_id else None
     contracts = list(db.scalars(select(Contract).where(Contract.space_id == space_id)).all())
+    # 一份合同可能覆盖同一企业的多间空间，space_id 只记在签约的第一间上。
+    # 直接按 space_id 查会让其余房间显示"已出租但无合同"，所以补一层企业维度兜底。
+    if not contracts and ent is not None:
+        contracts = list(db.scalars(
+            select(Contract).where(Contract.enterprise_id == ent.id)
+            .order_by(Contract.start_date.desc())).all())
     orders = list(db.scalars(select(WorkOrder).where(WorkOrder.space_id == space_id)
                              .order_by(WorkOrder.submit_at.desc())).all())
     return {
@@ -314,9 +324,15 @@ def space_detail(space_id: int, db: DbSession, auth: CurrentAuth) -> dict[str, A
             "space_type": s.space_type, "status": s.status, "area": s.area,
             "rentable_area": s.rentable_area, "rent_price": s.rent_price,
             "property_price": s.property_price, "orientation": s.orientation,
-            "floor_height": s.floor_height, "load_bearing": s.load_bearing,
-            "has_air_condition": s.has_air_condition, "has_network": s.has_network,
-            "has_power_capacity": s.has_power_capacity, "remark": s.remark,
+            "decoration": s.decoration,
+            # 这四个字段模型上并不存在（历史遗留），直接取属性会 500。
+            # 用 getattr 兜底为 None，前端按"未登记"显示，不编造参数。
+            "floor_height": getattr(s, "floor_height", None),
+            "load_bearing": getattr(s, "load_bearing", None),
+            "has_air_condition": getattr(s, "has_air_conditioner", None),
+            "has_network": getattr(s, "has_network", None),
+            "has_power_capacity": getattr(s, "has_power_capacity", None),
+            "remark": s.remark,
             "lease_start": s.lease_start.isoformat() if s.lease_start else None,
             "lease_end": s.lease_end.isoformat() if s.lease_end else None,
             "vacant_since": s.vacant_since.isoformat() if s.vacant_since else None,
@@ -331,8 +347,9 @@ def space_detail(space_id: int, db: DbSession, auth: CurrentAuth) -> dict[str, A
                        "contract_name": c.contract_name, "monthly_rent": c.monthly_rent,
                        "status": c.status,
                        "start_date": c.start_date.isoformat() if c.start_date else None,
-                       "end_date": c.end_date.isoformat() if c.end_date else None}
-                      for c in contracts],
+                       "end_date": c.end_date.isoformat() if c.end_date else None,
+                       "multi_space": c.space_id != space_id,
+                       } for c in contracts],
         "work_orders": [{"id": o.id, "order_code": o.order_code, "title": o.title,
                          "status": o.status, "priority": o.priority,
                          "submit_at": o.submit_at.isoformat() if o.submit_at else None}

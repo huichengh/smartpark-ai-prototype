@@ -21,15 +21,66 @@ from app.core.security import CurrentAuth, DbSession
 from app.models import (
     ApprovalRequest,
     ApprovalStep,
+    Building,
     Contract,
     Enterprise,
+    Park,
     Project,
     ProjectChange,
+    Space,
     User,
 )
 from app.schemas.common import paginate
 
 router = APIRouter(prefix="/approvals", tags=["审批中心"])
+
+
+def _approval_locations(db: Session, rows: list[ApprovalRequest]) -> dict[int, dict]:
+    """给每张审批单定位到「园区 · 楼栋 · 单元」。
+
+    审批表本身只有 park_id 和关联对象 id，没有楼栋/单元字段。做法是按企业反查
+    其在租空间（SPACE_DISCOUNT、CONTRACT_RENEWAL 这类企业侧审批都有 enterprise_id），
+    再取该空间所在的楼栋与编号；查不到就只给园区，不编造层级。
+    """
+    park_map = {p.id: p for p in db.scalars(select(Park)).all()}
+
+    ent_ids = {r.enterprise_id for r in rows if r.enterprise_id}
+    spaces_by_ent: dict[int, list[Space]] = {}
+    if ent_ids:
+        for sp in db.scalars(select(Space).where(Space.enterprise_id.in_(ent_ids))
+                             .order_by(Space.id)).all():
+            spaces_by_ent.setdefault(sp.enterprise_id, []).append(sp)
+
+    b_ids = {sp.building_id for lst in spaces_by_ent.values() for sp in lst if sp.building_id}
+    b_map = {b.id: b for b in db.scalars(select(Building).where(Building.id.in_(b_ids))
+                                         ).all()} if b_ids else {}
+
+    out: dict[int, dict] = {}
+    for r in rows:
+        park = park_map.get(r.park_id)
+        building_name = space_name = None
+        if r.enterprise_id:
+            cands = spaces_by_ent.get(r.enterprise_id) or []
+            # 优先取在租的那间，其次取第一间
+            sp = next((x for x in cands if x.status == "RENTED"), cands[0] if cands else None)
+            if sp:
+                # 用 space_code（如 26F-001），space_name 里已经带了楼栋名，
+                # 拼起来会变成"云谷大厦 A 座 · 云谷大厦 A 座26F-001"这种重复
+                space_name = sp.space_code or sp.space_name
+                b = b_map.get(sp.building_id)
+                building_name = b.building_name if b else None
+                # 有楼栋时以楼栋所属园区为准：审批单上的 park_id 是随机分配的，
+                # 和企业实际所在园区未必一致，混着用会出现"星海园区 · PARK-YG 的大厦"这种自相矛盾
+                if b is not None:
+                    park = park_map.get(b.park_id) or park
+        out[r.id] = {
+            "park_name": park.park_name if park else None,
+            "building_name": building_name,
+            "space_name": space_name,
+            "text": " · ".join([x for x in (park.park_name if park else None,
+                                            building_name, space_name) if x]),
+        }
+    return out
 
 
 def _step_role_map(db: Session, approval_ids: list[int]) -> dict[int, dict[int, str]]:
@@ -124,6 +175,7 @@ def list_approvals(db: DbSession, auth: CurrentAuth,
     rows = list(db.scalars(q.order_by(ApprovalRequest.apply_at.desc())).all())
     users = {u.id: u for u in db.scalars(select(User)).all()}
     role_map = _step_role_map(db, [r.id for r in rows])
+    loc_map = _approval_locations(db, rows)
     items = [{
         "id": r.id, "approval_code": r.approval_code, "title": r.title,
         "approval_type": r.approval_type,
@@ -146,6 +198,8 @@ def list_approvals(db: DbSession, auth: CurrentAuth,
         "is_pending": r.status in ("PENDING", "IN_REVIEW"),
         "can_i_approve": can_approve(auth, r, role_map),
         "finish_at": r.finish_at.isoformat() if r.finish_at else None,
+        # 审批列表里直接显示"哪个园区哪栋楼哪个单元"，不用点进去才知道
+        "location": loc_map.get(r.id, {}),
     } for r in rows]
     if only_mine:
         items = [i for i in items if i["applicant_id"] == auth.user.id or i["can_i_approve"]]

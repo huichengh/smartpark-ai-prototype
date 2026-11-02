@@ -17,10 +17,8 @@ import {
   PageHeader, Panel, ProgressBar, Segmented, Tag, inputCls,
 } from '@/components/ui'
 import { Chart, barOption } from '@/components/Charts'
-import {
-  AlertTriangle, ArrowLeft, Bot, CheckCircle2, Clock, FileText,
-  RefreshCw, RotateCcw, User, XCircle,
-} from 'lucide-react'
+import {AlertTriangle, ArrowLeft, Bot, CheckCircle2, Clock, FileText,
+  RefreshCw, RotateCcw, User, XCircle, MapPin } from 'lucide-react'
 
 type AnyRow = Record<string, any>
 
@@ -237,6 +235,12 @@ export default function Approval() {
                         )}
                       </div>
                       <div className="mt-0.5 font-num text-[11px] text-slate-500">{r.approval_code}</div>
+                      {r.location?.text && (
+                        <div className="mt-0.5 flex items-center gap-1 text-[11px] text-slate-500">
+                          <MapPin size={10} className="shrink-0 text-slate-600" />
+                          <span className="truncate">{r.location.text}</span>
+                        </div>
+                      )}
                     </div>
                   ),
                 },
@@ -356,6 +360,7 @@ export default function Approval() {
                   {([
                     ['审批类型', ap.approval_type_name],
                     ['申请人', ap.applicant_name],
+                    ['位置', ap.location?.text],
                     ['申请时间', fmtTime(ap.apply_at)],
                     ['金额', Number(ap.amount) > 0 ? `${money(ap.amount)} 元` : '—'],
                     ['当前环节', `${ap.current_step_name ?? '—'}（第 ${ap.current_step}/${ap.total_steps} 步）`],
