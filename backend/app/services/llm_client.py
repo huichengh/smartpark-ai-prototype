@@ -1,0 +1,307 @@
+"""Qwen（或任何 OpenAI 兼容端点）接入层。
+
+设计原则（和项目其它地方一致）：
+
+1. **数字不交给模型**。模型只能"选工具、组织语言"，所有金额/比率/日期来自
+   `call_tool()` 的真实返回。模型若在正文里编了数字，`_block` 的关键数据仍然
+   使用工具结果，不会被覆盖。
+2. **失败必须退回规则模式**。超时、断网、返回格式不对，一律抛异常由上层捕获，
+   回落到 `orchestrator.answer()`，演示不会开天窗。
+3. **同一套提示词，本地与云端通用**。默认指向 Ollama 的 OpenAI 兼容端点，
+   改三个环境变量就能切到 DashScope / 硅基流动 等云端服务。
+
+环境变量：
+    AGENT_MODE=auto|llm|rule     auto=优先大模型，失败回落规则；rule=只用规则
+    LLM_BASE_URL                 默认 http://127.0.0.1:11434/v1（Ollama）
+    LLM_API_KEY                  本地可留空
+    LLM_MODEL                    默认 qwen3.6:8b
+    LLM_TIMEOUT                  单次请求超时秒数，默认 30
+"""
+from __future__ import annotations
+
+import inspect
+import json
+import re
+from typing import Any, Callable
+
+import httpx
+from sqlalchemy.orm import Session
+
+from app.agent.tools import TOOL_REGISTRY, call_tool
+from app.core.config import settings
+from app.core.security import AuthContext
+
+MAX_TOOL_ROUNDS = 4
+MAX_TOOLS_IN_PROMPT = 25
+
+
+# --------------------------------------------------------------------------
+# 配置
+# --------------------------------------------------------------------------
+def config() -> dict[str, Any]:
+    """唯一来源是 app.core.config.settings。
+
+    这里不再单独读环境变量：之前两处各读一次，默认值还不一样（config 是 rule、
+    这里是 auto），排查起来会很费劲。改配置只改 config.py 一处。
+    """
+    return {
+        "mode": (settings.AGENT_MODE or "rule").lower(),
+        "base_url": (settings.LLM_BASE_URL or "").rstrip("/"),
+        "api_key": settings.LLM_API_KEY or "not-needed",
+        "model": settings.LLM_MODEL or "qwen3.6:8b",
+        "timeout": float(settings.LLM_TIMEOUT or 30),
+    }
+
+
+def enabled() -> bool:
+    """是否启用大模型路径。rule 模式下永远走规则。"""
+    return config()["mode"] in ("auto", "llm") and bool(config()["base_url"])
+
+
+def is_forced_llm() -> bool:
+    """llm 模式表示"只用大模型"（失败也报错），auto 模式失败可回落。"""
+    return config()["mode"] == "llm"
+
+
+# --------------------------------------------------------------------------
+# 工具 schema：从函数签名生成，避免手工维护 25 份 JSON
+# --------------------------------------------------------------------------
+_PY2JSON = {
+    str: "string", int: "integer", float: "number", bool: "boolean",
+    list: "array", dict: "object",
+}
+
+
+def _annotation_to_schema(ann: Any) -> dict[str, Any]:
+    if ann is inspect.Parameter.empty:
+        return {"type": "string"}
+    # Optional[int] / int | None
+    origin = getattr(ann, "__origin__", None)
+    if origin is not None:
+        args = [a for a in getattr(ann, "__args__", ()) if a is not type(None)]
+        if args:
+            return _annotation_to_schema(args[0])
+        return {"type": "object"}
+    base = _PY2JSON.get(ann)
+    if base:
+        return {"type": base}
+    name = str(getattr(ann, "__name__", "")).lower()
+    if name in ("int", "float", "str", "bool"):
+        return {"type": _PY2JSON.get({"int": int, "float": float, "str": str, "bool": bool}[name], "string")}
+    return {"type": "string"}
+
+
+def tool_schemas(limit: int = MAX_TOOLS_IN_PROMPT) -> list[dict[str, Any]]:
+    """把注册表里的工具转成 OpenAI function calling 定义。
+
+    跳过 `db` / `auth`（由 call_tool 注入）和 `kw`（原始问句，由我们透传）：
+    这些都该由运行时决定，让模型填只会增加填错的概率。
+    """
+    out: list[dict[str, Any]] = []
+    for name, entry in list(TOOL_REGISTRY.items())[:limit]:
+        fn: Callable = entry["fn"]
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            continue
+        props: dict[str, Any] = {}
+        required: list[str] = []
+        for pname, param in sig.parameters.items():
+            if pname in ("db", "auth", "kw"):
+                continue
+            props[pname] = _annotation_to_schema(param.annotation)
+            if param.default is inspect.Parameter.empty:
+                required.append(pname)
+        out.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": (entry.get("description") or name)[:500],
+                "parameters": {"type": "object", "properties": props,
+                               "required": required},
+            },
+        })
+    return out
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+def _post(payload: dict[str, Any]) -> dict[str, Any]:
+    cfg = config()
+    url = f"{cfg['base_url']}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if cfg["api_key"] and cfg["api_key"] != "not-needed":
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    with httpx.Client(timeout=cfg["timeout"]) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _chat(messages: list[dict], tools: list[dict] | None = None,
+          temperature: float = 0.2) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": config()["model"],
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    return _post(payload)
+
+
+SYSTEM_PROMPT = """你是"园智汇 ParkOS"的园区经营助手。你可以调用平台提供的工具来读取真实业务数据。
+
+铁律：
+1. 任何数字（金额、面积、比率、天数、数量）只能来自工具返回，不得自己估算或编造。
+2. 如果工具没有返回需要的数据，直接说明"数据不足"，不要用常识补全。
+3. 不确定就用工具查；不要凭想象描述园区的现状。
+4. 回答用中文，简洁、具体，不说套话。
+"""
+
+JSON_PROMPT = """基于上面工具返回的真实数据，输出一个 JSON（不要加代码围栏，不要多余文字），字段：
+{
+  "结论": "一句话结论，必须包含至少一个来自工具的具体数字",
+  "关键数据": [{"label": "指标名", "value": "数值", "unit": "单位"}],
+  "原因分析": ["..."],
+  "建议措施": ["..."],
+  "影响范围": "一句话",
+  "风险": ["..."],
+  "责任部门/角色": ["..."],
+  "决策状态": "只能是 INFO、AI_SUGGESTION、NEED_CONFIRM、NEED_APPROVAL 之一"
+}
+要求：所有数字必须来自工具返回；数据不足时在"结论"里直说，不要编。"""
+
+
+# --------------------------------------------------------------------------
+# 主流程
+# --------------------------------------------------------------------------
+def _strip_json(text: str) -> str:
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"\s*```$", "", t)
+    start, end = t.find("{"), t.rfind("}")
+    return t[start:end + 1] if start >= 0 and end > start else t
+
+
+def run(db: Session, auth: AuthContext, question: str,
+        park_id: int | None = None) -> dict[str, Any]:
+    """执行一次带工具调用的问答。
+
+    返回结构与 orchestrator 的 route 结果保持一致，便于上层统一落库。
+    任何异常都会抛出，由调用方回落到规则模式。
+    """
+    from app.agent.orchestrator import DecisionStatus, _block
+
+    tools = tool_schemas()
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+    used: list[dict[str, Any]] = []       # 记录每次工具调用，供 evidence 用
+    tool_payloads: list[dict[str, Any]] = []
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        data = _chat(messages, tools)
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            # 模型不再调工具 → 进入成文阶段
+            messages.append({"role": "assistant", "content": msg.get("content") or ""})
+            break
+
+        messages.append(msg)
+        for call in calls:
+            fname = (call.get("function") or {}).get("name")
+            raw_args = (call.get("function") or {}).get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
+            # kw 是工具内部的关键词参数，直接透传原始问句；
+            # park_id 由当前页面上下文决定，不让模型猜。
+            args.setdefault("kw", question)
+            if park_id is not None:
+                args.setdefault("park_id", park_id)
+            try:
+                result = call_tool(fname, db, auth, **args)
+            except Exception as exc:  # noqa: BLE001
+                result = {"error": f"工具执行失败：{exc}", "tool_error": True}
+            used.append({"tool": fname, "args": args,
+                         "ok": not result.get("tool_error")})
+            tool_payloads.append(result)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id"),
+                "content": json.dumps(result, ensure_ascii=False, default=str)[:6000],
+            })
+
+    messages.append({"role": "system", "content": JSON_PROMPT})
+    data = _chat(messages, tools=None)
+    content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+    try:
+        parsed = json.loads(_strip_json(content))
+    except json.JSONDecodeError:
+        parsed = {"结论": content.strip()[:300] or "模型未返回可解析的内容。"}
+
+    # 模型可能返回我们没定义的状态名，必须收敛到真实枚举，
+    # 否则 _block 会带着一个非法值落库，前端展示时对不上。
+    allowed = {x.value: x.value for x in DecisionStatus}
+    raw_decision = str(parsed.get("决策状态") or "").strip()
+    decision = raw_decision if raw_decision in allowed else DecisionStatus.INFO.value
+
+    key_data = [d for d in (parsed.get("关键数据") or []) if isinstance(d, dict)]
+    block = _block(
+        conclusion=str(parsed.get("结论") or "（模型未给出结论）"),
+        key_data=key_data,
+        reasons=[str(x) for x in (parsed.get("原因分析") or [])],
+        suggestions=[str(x) for x in (parsed.get("建议措施") or [])],
+        impact=str(parsed.get("影响范围") or ""),
+        risks=[str(x) for x in (parsed.get("风险") or [])],
+        owners=[str(x) for x in (parsed.get("责任部门/角色") or [])],
+        decision=decision,
+        data_sufficient=bool(tool_payloads),
+        missing=[] if tool_payloads else ["未调用到任何工具，回答缺少数据支撑"],
+    )
+
+    return {
+        "agent_key": "llm",
+        "agent_name": f"大模型（{config()['model']}）",
+        "intent": "llm",
+        "response": block,
+        "evidence": {
+            "data_source": "平台业务数据库（经工具调用）",
+            "tool_calls": used,
+            "model": config()["model"],
+            "endpoint": config()["base_url"],
+            "data_label": "演示数据",
+        },
+        "model_mode": "llm",
+    }
+
+
+def status() -> dict[str, Any]:
+    """连通性自检：给前端/运维一个"模型到底通没通"的明确答复。"""
+    cfg = config()
+    info: dict[str, Any] = {
+        "mode": cfg["mode"], "model": cfg["model"], "base_url": cfg["base_url"],
+        "enabled": enabled(), "reachable": False, "error": None,
+        "tool_count": len(TOOL_REGISTRY),
+    }
+    if not enabled():
+        info["error"] = "AGENT_MODE=rule，未启用大模型"
+        return info
+    try:
+        data = _post({
+            "model": cfg["model"],
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 8,
+        })
+        info["reachable"] = bool(data.get("choices"))
+    except Exception as exc:  # noqa: BLE001
+        info["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    return info

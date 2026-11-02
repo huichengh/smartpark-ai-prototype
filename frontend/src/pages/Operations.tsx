@@ -28,10 +28,12 @@ const WO_STATUS_TONE: Record<string, string> = {
   PROCESSING: 'warn', FINISHED: 'ok', CLOSED: 'ok', CANCELLED: 'muted',
 }
 const DEVICE_STATUS_TONE: Record<string, string> = {
-  RUNNING: 'ok', IDLE: 'muted', FAULT: 'danger', MAINTENANCE: 'warn', SCRAPPED: 'muted',
+  RUNNING: 'ok', IDLE: 'muted', FAULT: 'danger', MAINTENANCE: 'warn',
+  MAINTAINING: 'warn', OFFLINE: 'info', SCRAPPED: 'muted',
 }
 const DEVICE_STATUS_LABEL: Record<string, string> = {
-  RUNNING: '运行中', IDLE: '闲置', FAULT: '故障', MAINTENANCE: '维保中', SCRAPPED: '已报废',
+  RUNNING: '运行中', IDLE: '闲置', FAULT: '故障', MAINTENANCE: '维保中',
+  MAINTAINING: '维保中', OFFLINE: '离线', SCRAPPED: '已报废',
 }
 
 type Tab = 'order' | 'device'
@@ -105,6 +107,29 @@ export default function Operations() {
   )
 
   const deviceStats = devices.data?.stats ?? {}
+
+  // 设备状态分布：把 by_status 字典转成环形图，颜色沿用状态色
+  const deviceStatusOption = useMemo(() => {
+    const by = deviceStats.by_status ?? {}
+    const order = ['RUNNING', 'FAULT', 'MAINTAINING', 'MAINTENANCE', 'OFFLINE', 'IDLE', 'SCRAPPED']
+    const rows = order.filter((k) => by[k]).map((k) => ({
+      name: DEVICE_STATUS_LABEL[k] ?? k,
+      value: Number(by[k]) || 0,
+    }))
+    const total = rows.reduce((a, b) => a + b.value, 0)
+    const running = rows.find((x) => x.name === '运行中')?.value ?? 0
+    return pieOption({
+      data: rows,
+      centerLabel: { title: '运行占比', value: total ? `${Math.round((running / total) * 100)}%` : '—' },
+    })
+  }, [deviceStats])
+
+  // 需要处理的设备：故障中 + 维保逾期
+  const problemDevices = useMemo(() => {
+    const items: any[] = (devices.data as any)?.items ?? []
+    return items.filter((d) => d.status === 'FAULT' || d.maintain_overdue)
+      .sort((a, b) => (a.status === 'FAULT' ? -1 : 1) - (b.status === 'FAULT' ? -1 : 1))
+  }, [devices.data])
   const deviceTypeOption = useMemo(
     () =>
       pieOption({
@@ -437,6 +462,64 @@ export default function Operations() {
           </>
         )}
       </Panel>
+
+
+      {tab === 'device' && (
+        <>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+            <KpiCard label="设备总数" value={deviceStats.total ?? 0} unit="台" />
+            <KpiCard label="在线率" value={deviceStats.online_rate ?? 0} unit="%" tone="ok"
+                     hint="在线设备 ÷ 非报废设备" />
+            <KpiCard label="故障设备" value={deviceStats.fault_count ?? 0} unit="台"
+                     tone={(deviceStats.fault_count ?? 0) > 0 ? 'risk' : 'ok'} />
+            <KpiCard label="维保逾期" value={deviceStats.maintain_overdue ?? 0} unit="台"
+                     tone={(deviceStats.maintain_overdue ?? 0) > 0 ? 'warn' : 'ok'} />
+            <KpiCard label="平均健康度" value={deviceStats.avg_health_score ?? '—'} unit="分"
+                     hint="低于 55 分的设备需重点关注" />
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-5">
+            <Panel title="设备状态分布" subtitle="运行 / 故障 / 维保 / 离线" className="lg:col-span-2">
+              <Chart height={260} option={deviceStatusOption}
+                     empty={Object.keys(deviceStats.by_status ?? {}).length === 0} />
+            </Panel>
+
+            <Panel title="需要处理的设备"
+                   subtitle={`故障 ${deviceStats.fault_count ?? 0} 台 · 维保逾期 ${deviceStats.maintain_overdue ?? 0} 台`}
+                   className="lg:col-span-3">
+              {devices.loading ? (
+                <Loading text="正在读取设备状态…" />
+              ) : problemDevices.length === 0 ? (
+                <EmptyState text="当前没有需要处理的设备" hint="所有设备运行正常，且无逾期维保" />
+              ) : (
+                <ul className="space-y-2">
+                  {problemDevices.slice(0, 8).map((d: any) => (
+                    <li key={d.id} className="flex items-start justify-between gap-3 rounded-lg border border-white/8 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-[13px] text-slate-100">{d.device_name}</span>
+                          <Tag tone={(DEVICE_STATUS_TONE[d.status] ?? 'muted') as any}>
+                            {DEVICE_STATUS_LABEL[d.status] ?? d.status}
+                          </Tag>
+                          {d.maintain_overdue && <Tag tone="warn">维保逾期</Tag>}
+                        </div>
+                        <p className="mt-1 truncate text-[11px] text-slate-500">
+                          {d.device_code} · {d.building_name ?? d.location ?? '位置未登记'}
+                          {d.owner_name ? ` · 责任人 ${d.owner_name}` : ''}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="font-num text-[13px] text-slate-200">{d.health_score ?? '—'}</p>
+                        <p className="text-[10px] text-slate-600">健康度</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Panel>
+          </div>
+        </>
+      )}
 
       {tab === 'device' && Object.keys(deviceStats.by_type ?? {}).length > 0 && (
         <Panel title="设备类型构成" subtitle={`共 ${deviceStats.total ?? 0} 台设备`}>
