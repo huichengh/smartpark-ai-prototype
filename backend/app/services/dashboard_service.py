@@ -332,9 +332,17 @@ def get_dashboard_summary(db: Session, auth: AuthContext, park_id: int | None = 
              basis=f"项目实际成本 {total_actual:,.0f} 元 ÷ 批准预算 {total_budget:,.0f} 元"
                    + ("；尚无预算数据" if not total_budget else ""),
              data_status="数据不足：项目未登记预算" if not total_budget else "正常", link="/project"),
-        _kpi("monthly_income", "本月经营收入", cur_received, unit="元",
-             yoy=_pct(cur_received, ly_received), mom=_pct(cur_received, lm_received),
-             basis=f"本月账单实收合计（应收 {cur_receivable:,.0f} 元）；年度累计 {ytd_income:,.0f} 元", link="/finance"),
+        _kpi("monthly_income", "本月经营收入",
+             # 月初还没出账时，本月实收必然是 0——这不是"收入归零"，而是"还没有数据"。
+             # 直接显示 0 元 + 环比 -100%，在首屏看起来像园区当月收入崩了。
+             cur_received if cur_receivable else None, unit="元",
+             yoy=_pct(cur_received, ly_received) if cur_receivable else None,
+             mom=_pct(cur_received, lm_received) if cur_receivable else None,
+             basis=(f"本月账单实收合计（应收 {cur_receivable:,.0f} 元）；年度累计 {ytd_income:,.0f} 元"
+                    if cur_receivable else "本月尚未出账，暂无本月收入数据（年度累计 "
+                    f"{ytd_income:,.0f} 元）"),
+             data_status="正常" if cur_receivable else "数据不足：本月尚未出账",
+             link="/finance"),
     ]
 
     # ================= 图表数据 =================

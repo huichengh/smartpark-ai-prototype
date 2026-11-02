@@ -453,7 +453,7 @@ class LeasingLead(Base, TimestampMixin):
     demand_budget: Mapped[float] = mapped_column(Float, default=0.0)       # 预算 元/m²/月
     demand_space_type: Mapped[str | None] = mapped_column(String(40))
     demand_floor: Mapped[str | None] = mapped_column(String(40))
-    investment_amount: Mapped[float] = mapped_column(Float, default=0.0)   # 投资规模 万元
+    investment_amount: Mapped[float] = mapped_column(Float, default=0.0)   # 投资规模（元）= 意向面积 × 单位投资强度
     expected_employees: Mapped[int] = mapped_column(Integer, default=0)
     expected_settle_date: Mapped[dt.date | None] = mapped_column(Date)
     qualification: Mapped[str | None] = mapped_column(String(200))

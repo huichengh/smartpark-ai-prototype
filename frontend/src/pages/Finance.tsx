@@ -17,8 +17,16 @@ import { Chart, barOption, lineOption, pieOption, rankBarOption } from '@/compon
 const fmt = (v: any, d = 2) =>
   v == null ? '—' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d })
 
+/**
+ * 金额展示：按量级自动切 亿元 / 万元，空值显示 "—"。
+ *
+ * 原来的写法把 null 当 0（月初没出账就显示"0.0 万"），
+ * 而且上亿的数字会写成"131003.3 万"，在卡片里换行、读不出量级。
+ */
 const wan = (v: any) => {
+  if (v == null) return '—'
   const n = Number(v) || 0
+  if (Math.abs(n) >= 1e8) return `${(n / 1e8).toFixed(1)} 亿`
   return `${(n / 10000).toFixed(1)} 万`
 }
 

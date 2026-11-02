@@ -16,7 +16,16 @@ import { Chart, barOption, pieOption } from '@/components/Charts'
 const fmt = (v: any, d = 0) =>
   v == null ? '—' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d })
 
-const PLATE_TYPE: Record<string, string> = {
+/**
+ * 车辆类型字典。
+ *
+ * 后端 vehicles.vehicle_type 存的是能源类型（FUEL / NEW_ENERGY），
+ * 早期这张表按"月租/临时/访客"建，键名对不上，于是页面上直接漏出了英文枚举。
+ * 现在两种口径都收录，未知值兜底显示"其他"而不是原始枚举。
+ */
+const VEHICLE_TYPE: Record<string, string> = {
+  FUEL: '燃油车',
+  NEW_ENERGY: '新能源车',
   MONTH: '月租车', TEMP: '临时车', VIP: 'VIP', VISITOR: '访客车', STAFF: '员工车',
 }
 
@@ -65,7 +74,7 @@ export default function Parking() {
   const vehicleOption = useMemo(() => {
     const by = vh.by_type ?? {}
     const arr = Object.entries(by).map(([k, v]) => ({
-      name: PLATE_TYPE[k] ?? k,
+      name: VEHICLE_TYPE[k] ?? '其他',
       value: Number(v) || 0,
     }))
     return pieOption({
@@ -124,7 +133,7 @@ export default function Parking() {
             <Panel title="车位使用构成" subtitle="占用 / 空闲 / 预留">
               <Chart height={280} option={spaceOption} empty={!sp.total} />
             </Panel>
-            <Panel title="车辆类型构成" subtitle="按月租 / 临时 / 访客等归集">
+            <Panel title="车辆能源类型" subtitle="燃油车与新能源车占比">
               <Chart height={280} option={vehicleOption} empty={!vh.total} />
             </Panel>
             <Panel title="车位类型分布" subtitle="按车位类型统计">

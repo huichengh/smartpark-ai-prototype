@@ -66,11 +66,17 @@ def build_operating_report(db: Session, auth: AuthContext,
         ] + (d.get("data_status_notes") or []))
         warnings.extend(d.get("data_status_notes") or [])
 
-        if kpis.get("occupancy_rate", {}).get("value", 0) < 80:
-            warnings.append(f"空间出租率 {kpis['occupancy_rate']['value']}% 低于 80%，需加强招商去化。")
-        if kpis.get("collection_rate", {}).get("value", 0) < 95:
-            warnings.append(f"租金收缴率 {kpis['collection_rate']['value']}% 低于目标 95%。")
-        highlights.append(f"本月经营收入 {kpis.get('monthly_income', {}).get('value', 0):,.0f} 元。")
+        # 指标可能为 None（例如月初尚未出账），比较与格式化前必须判空，
+        # 否则 None < 80 或 None:,.0f 会直接抛异常，整份报告生成失败。
+        _occ = kpis.get("occupancy_rate", {}).get("value")
+        if _occ is not None and _occ < 80:
+            warnings.append(f"空间出租率 {_occ}% 低于 80%，需加强招商去化。")
+        _col = kpis.get("collection_rate", {}).get("value")
+        if _col is not None and _col < 95:
+            warnings.append(f"租金收缴率 {_col}% 低于目标 95%。")
+        _mi = kpis.get("monthly_income", {}).get("value")
+        highlights.append(f"本月经营收入 {_mi:,.0f} 元。" if _mi is not None
+                          else "本月尚未出账，暂无本月收入数据。")
     else:
         sec("一、经营总览", {}, [], ["经营数据获取失败。"], True, ["驾驶舱数据"])
 
