@@ -189,6 +189,10 @@ SYSTEM_PROMPT = """你是"园智汇 ParkOS"的园区经营助手。你可以调�
 2. 如果工具没有返回需要的数据，直接说明"数据不足"，不要用常识补全。
 3. 不确定就用工具查；不要凭想象描述园区的现状。
 4. 回答用中文，简洁、具体，不说套话。
+5. 工具结果都在 data 字段里。若第一次调用的工具没有给出所需数据，
+   换一个更对口的工具继续调用，不要直接回答"数据不足"。
+6. 问经营总览类指标（出租率、收缴率、工单完成率、企业数等），
+   优先用 get_dashboard_summary；问空置与招商方案用 get_space_status / get_operating_metrics。
 """
 
 JSON_PROMPT = """基于上面工具返回的真实数据，输出一个 JSON（不要加代码围栏，不要多余文字），字段：
@@ -216,6 +220,80 @@ def _strip_json(text: str) -> str:
     return t[start:end + 1] if start >= 0 and end > start else t
 
 
+def _numbers_in(text: str) -> set[str]:
+    """抽出文本里的数字（保留两位以内小数），用于与工具返回比对。"""
+    out: set[str] = set()
+    for m in re.findall(r"\d+(?:\.\d{1,2})?", text or ""):
+        out.add(m.rstrip("."))
+    return out
+
+
+def check_numbers_grounded(conclusion: str, tool_text: str) -> tuple[bool, list[str]]:
+    """校验结论里的数字是否都能在工具返回中找到。
+
+    本地 3B 模型实测会把工具返回的 82.35% 写成 0%——这类错误比"慢"严重得多：
+    整个平台的可信度就建立在"数字有出处"上。凡是结论里出现工具没有的数字，
+    一律判定为不可信，由调用方回退到规则回答。
+    """
+    if not conclusion:
+        return True, []
+
+    allowed = _numbers_in(tool_text)
+    bad: list[str] = []
+    for n in _numbers_in(conclusion):
+        if n not in allowed:
+            bad.append(n)
+
+    # 光比数字不够：库里"延期项目=0 个"会让结论里的"出租率 0%"蒙混过关。
+    # 带百分号的结论数字，必须在工具返回里也以百分号形式出现。
+    for n in set(re.findall(r"(\d+(?:\.\d{1,2})?)\s*%", conclusion or "")):
+        if f"{n}%" not in re.sub(r"\s+", "", tool_text or ""):
+            bad.append(f"{n}%")
+    return (not bad), sorted(set(bad))
+
+
+def compact_result(result: dict[str, Any], limit: int = 4000) -> str:
+    """把工具返回压成模型读得懂的短文。
+
+    工具结果是给前端渲染用的，字段多、嵌套深（图表数据动辄上万字符）。
+    原样塞给 3B/4B 模型，它既读不完也读不准，往往直接答"数据不足"。
+    这里优先抽出 kpis / 关键计数字段，其余按需截断。
+    """
+    data = result.get("data") if isinstance(result, dict) else None
+    if isinstance(data, dict):
+        kpis = data.get("kpis")
+        if isinstance(kpis, list) and kpis:
+            parts = []
+            for k in kpis:
+                if not isinstance(k, dict):
+                    continue
+                label = k.get("label") or k.get("key")
+                val = k.get("value")
+                if val is None:
+                    continue
+                parts.append(f"{label}={val}{k.get('unit') or ''}")
+            if parts:
+                return "关键指标：" + "；".join(parts)
+
+        # 无 kpis 时，收窄成顶层若干标量字段 + 数组长度，避免整棵子树
+        brief: dict[str, Any] = {}
+        for k, v in data.items():
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                brief[k] = v
+            elif isinstance(v, list):
+                brief[k] = f"[{len(v)} 条]" + (
+                    f" 首条：{json.dumps(v[0], ensure_ascii=False, default=str)[:200]}" if v else ""
+                )
+            elif isinstance(v, dict):
+                brief[k] = f"{{{len(v)} 个字段}}"
+        if brief:
+            return json.dumps(brief, ensure_ascii=False, default=str)[:limit]
+
+    if result.get("error"):
+        return f"工具执行失败：{result['error']}"
+    return json.dumps(result, ensure_ascii=False, default=str)[:limit]
+
+
 def run(db: Session, auth: AuthContext, question: str,
         park_id: int | None = None) -> dict[str, Any]:
     """执行一次带工具调用的问答。
@@ -233,6 +311,7 @@ def run(db: Session, auth: AuthContext, question: str,
 
     used: list[dict[str, Any]] = []       # 记录每次工具调用，供 evidence 用
     tool_payloads: list[dict[str, Any]] = []
+    tool_payloads_text: list[str] = []
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = _chat(messages, tools)
@@ -263,10 +342,11 @@ def run(db: Session, auth: AuthContext, question: str,
             used.append({"tool": fname, "args": args,
                          "ok": not result.get("tool_error")})
             tool_payloads.append(result)
+            tool_payloads_text.append(compact_result(result))
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id"),
-                "content": json.dumps(result, ensure_ascii=False, default=str)[:6000],
+                "content": compact_result(result),
             })
 
     messages.append({"role": "system", "content": JSON_PROMPT})
@@ -283,6 +363,12 @@ def run(db: Session, auth: AuthContext, question: str,
     allowed = {x.value: x.value for x in DecisionStatus}
     raw_decision = str(parsed.get("决策状态") or "").strip()
     decision = raw_decision if raw_decision in allowed else DecisionStatus.INFO.value
+
+    # 数字校验：结论里的每个数字都必须在工具返回里出现过，否则整段不可信
+    grounded, bad_numbers = check_numbers_grounded(
+        str(parsed.get("结论") or ""), "\n".join(tool_payloads_text))
+    if not grounded:
+        raise ValueError(f"模型结论含工具未返回的数字：{bad_numbers}，已回落规则回答")
 
     key_data = [d for d in (parsed.get("关键数据") or []) if isinstance(d, dict)]
     block = _block(
