@@ -71,6 +71,8 @@ export default function Approval() {
   const [comment, setComment] = useState('')
   const [busy, setBusy] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
+  // 审批分两个渠道：企业提的外部工单、园区员工提的内部审批
+  const [channel, setChannel] = useState<'' | 'EXTERNAL' | 'INTERNAL'>('')
   const [page, setPage] = useState(1)
   const pageSize = 20
 
@@ -81,8 +83,9 @@ export default function Approval() {
         page,
         page_size: pageSize,
         status: statusFilter || undefined,
+        channel: channel || undefined,
       }),
-    [page, statusFilter],
+    [page, statusFilter, channel],
     { enabled: tab === 'all' },
   )
   const detail = useAsync(
@@ -185,6 +188,17 @@ export default function Approval() {
             { value: 'all', label: '全部审批' },
           ]}
         />
+        {tab === 'all' && (
+          <Segmented
+            value={channel || 'ALL'}
+            onChange={(v) => { setChannel(v === 'ALL' ? '' : (v as 'EXTERNAL' | 'INTERNAL')); setPage(1) }}
+            options={[
+              { value: 'ALL', label: '全部' },
+              { value: 'EXTERNAL', label: `外部工单（企业）${all.data?.stats?.by_channel?.EXTERNAL ?? 0}` },
+              { value: 'INTERNAL', label: `内部审批（员工）${all.data?.stats?.by_channel?.INTERNAL ?? 0}` },
+            ]}
+          />
+        )}
         {tab === 'all' && (
           <select
             className={`${inputCls} max-w-[200px]`}

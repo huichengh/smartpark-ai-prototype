@@ -144,13 +144,25 @@ def can_approve(auth, r, role_map: dict) -> bool:
 # 几乎不交集，只有 PURCHASE 命中，导致类型名显示为英文枚举，
 # 且 stats.by_type 只统计到 1 类（其余 7 类被静默丢弃）。
 TYPE_NAMES = ENUM_LABELS["ApprovalType"]
+
+#: 审批按"谁发起"分两个渠道：
+#:   外部工单 —— 企业为自身诉求发起（租金优惠、合同续约等）
+#:   内部审批 —— 园区员工发起（采购、报销、预算、加班、项目变更、AI 建议动作）
+#: 申请人在数据里没有角色字段，因此按类型归类；新增类型时在此登记，未登记默认内部。
+EXTERNAL_TYPES = {"SPACE_DISCOUNT", "CONTRACT_RENEWAL", "ENTERPRISE_REQUEST"}
+CHANNEL_NAMES = {"EXTERNAL": "外部工单", "INTERNAL": "内部审批"}
+
+
+def _channel_of(approval_type: str) -> str:
+    return "EXTERNAL" if approval_type in EXTERNAL_TYPES else "INTERNAL"
 STATUS_NAMES = ENUM_LABELS["BusinessStatus"]
 
 
 @router.get("")
 def list_approvals(db: DbSession, auth: CurrentAuth,
                    park_id: int | None = None, status: str | None = None,
-                   approval_type: str | None = None, only_mine: bool = False,
+                   approval_type: str | None = None, channel: str | None = None,
+                   only_mine: bool = False,
                    keyword: str | None = None,
                    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
     auth.require("approval", "VIEW")
@@ -165,6 +177,7 @@ def list_approvals(db: DbSession, auth: CurrentAuth,
         q = q.where(ApprovalRequest.status == status)
     if approval_type:
         q = q.where(ApprovalRequest.approval_type == approval_type)
+
     if only_mine:
         # 我发起 或 我需要审批（后者在内存里按审批角色匹配，见 can_i_approve）
         q = q.where(or_(ApprovalRequest.applicant_id == auth.user.id,
@@ -173,6 +186,13 @@ def list_approvals(db: DbSession, auth: CurrentAuth,
         q = q.where(or_(ApprovalRequest.approval_code.contains(keyword),
                         ApprovalRequest.title.contains(keyword)))
     rows = list(db.scalars(q.order_by(ApprovalRequest.apply_at.desc())).all())
+
+    # 渠道计数要在过滤前统计，否则切到某个 Tab 后另一个 Tab 的数字会变成 0
+    channel_counts = {"EXTERNAL": 0, "INTERNAL": 0}
+    for r in rows:
+        channel_counts[_channel_of(r.approval_type)] += 1
+    if channel in ("EXTERNAL", "INTERNAL"):
+        rows = [r for r in rows if _channel_of(r.approval_type) == channel]
     users = {u.id: u for u in db.scalars(select(User)).all()}
     role_map = _step_role_map(db, [r.id for r in rows])
     loc_map = _approval_locations(db, rows)
@@ -180,6 +200,8 @@ def list_approvals(db: DbSession, auth: CurrentAuth,
         "id": r.id, "approval_code": r.approval_code, "title": r.title,
         "approval_type": r.approval_type,
         "approval_type_name": TYPE_NAMES.get(r.approval_type, r.approval_type),
+        "channel": _channel_of(r.approval_type),
+        "channel_name": CHANNEL_NAMES[_channel_of(r.approval_type)],
         "status": r.status, "status_name": STATUS_NAMES.get(r.status, r.status),
         "park_id": r.park_id,
         "applicant_id": r.applicant_id,
@@ -220,6 +242,7 @@ def list_approvals(db: DbSession, auth: CurrentAuth,
         "ai_generated": len([i for i in items if i["is_ai_generated"]]),
         "by_type": dict(sorted(type_counter.items(), key=lambda kv: kv[1], reverse=True)),
         "total_amount": round(sum(i["amount"] or 0 for i in pending), 2),
+        "by_channel": channel_counts,
     }
     return result
 
@@ -241,6 +264,8 @@ def my_todo(db: DbSession, auth: CurrentAuth) -> dict[str, Any]:
             "id": r.id, "approval_code": r.approval_code, "title": r.title,
             "approval_type": r.approval_type,
             "approval_type_name": TYPE_NAMES.get(r.approval_type, r.approval_type),
+        "channel": _channel_of(r.approval_type),
+        "channel_name": CHANNEL_NAMES[_channel_of(r.approval_type)],
             "applicant_name": r.applicant_name, "amount": r.amount,
             "apply_at": r.apply_at.isoformat() if r.apply_at else None,
             "pending_days": (dt.datetime.now() - r.apply_at).days if r.apply_at else None,
@@ -295,6 +320,8 @@ def approval_detail(approval_id: int, db: DbSession, auth: CurrentAuth) -> dict[
             "id": r.id, "approval_code": r.approval_code, "title": r.title,
             "approval_type": r.approval_type,
             "approval_type_name": TYPE_NAMES.get(r.approval_type, r.approval_type),
+        "channel": _channel_of(r.approval_type),
+        "channel_name": CHANNEL_NAMES[_channel_of(r.approval_type)],
             "status": r.status, "status_name": STATUS_NAMES.get(r.status, r.status),
             "content": r.content, "remark": r.remark,
             "applicant_id": r.applicant_id, "applicant_name": r.applicant_name,
