@@ -76,6 +76,20 @@ const ISO_Y = 0.5
 export default function Twin() {
   const { activeParkId, visibleParkIds, setActiveParkId } = useAuth()
   const nav = useNavigate()
+  // 风险明细抽屉：面板上的"存在风险"是一句提示，点开才知道具体是哪几条
+  const [risk, setRisk] = useState<any>(null)
+  const [riskLoading, setRiskLoading] = useState(false)
+
+  const openRisks = async (buildingId: number) => {
+    setRiskLoading(true)
+    try {
+      setRisk(await spaceApi.buildingRisks(buildingId))
+    } catch (e: any) {
+      setRisk({ error: e?.message || '风险明细加载失败' })
+    } finally {
+      setRiskLoading(false)
+    }
+  }
 
   const parks = useAsync(() => spaceApi.parks(), [])
   const parkList = useMemo(() => {
@@ -388,6 +402,12 @@ export default function Twin() {
               <div className="space-y-3.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] text-slate-500">运营状态</span>
+                  <button
+                    type="button"
+                    onClick={() => selected.level === 'RISK' && openRisks(selected.id)}
+                    className={selected.level === 'RISK' ? 'cursor-pointer' : 'cursor-default'}
+                    title={selected.level === 'RISK' ? '点击查看具体风险' : undefined}
+                  >
                   <Tag
                     tone={
                       selected.level === 'GOOD'
@@ -401,6 +421,7 @@ export default function Twin() {
                   >
                     {legend.find((l) => l.key === selected.level)?.name ?? selected.level ?? '—'}
                   </Tag>
+                  </button>
                 </div>
 
                 <StatLine
@@ -473,12 +494,17 @@ export default function Twin() {
                     </p>
                   </div>
                   {(selected.open_incident ?? 0) > 0 && (
-                    <div className="col-span-2 flex items-center gap-2 rounded-lg border border-state-danger/28 bg-state-danger/[0.07] px-2.5 py-2">
+                    <button
+                      type="button"
+                      onClick={() => openRisks(selected.id)}
+                      className="col-span-2 flex items-center gap-2 rounded-lg border border-state-danger/28 bg-state-danger/[0.07] px-2.5 py-2 text-left transition hover:border-state-danger/50 hover:bg-state-danger/[0.12]"
+                    >
                       <TriangleAlert size={13} className="text-state-danger" />
-                      <span className="text-[11px] text-state-danger">
+                      <span className="flex-1 text-[11px] text-state-danger">
                         有 {selected.open_incident} 起未闭环安全事件
                       </span>
-                    </div>
+                      <span className="text-[10px] text-state-danger/80">查看详情 ›</span>
+                    </button>
                   )}
                 </div>
 
@@ -594,6 +620,141 @@ export default function Twin() {
               ))}
             </div>
           </Panel>
+        </div>
+      )}
+
+
+      {/* ---------------------------------------------- 风险明细抽屉 */}
+      {risk && (
+        <div
+          className="fixed inset-0 flex justify-end bg-black/55 backdrop-blur-sm"
+          style={{ zIndex: 9200 }}
+          onClick={() => setRisk(null)}
+        >
+          <div
+            className="h-full w-full max-w-md overflow-y-auto border-l border-white/10 bg-nav-panel"
+            style={{ backgroundColor: '#0D1B2A' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-start justify-between gap-3 border-b border-white/8 bg-nav-panel px-5 py-4" style={{ backgroundColor: '#0D1B2A' }}>
+              <div>
+                <h3 className="text-[15px] font-semibold text-slate-100">
+                  {risk.building?.building_name ?? '楼栋'} · 风险明细
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  {riskLoading ? '加载中…' : `未闭环：安全事件 ${risk.summary?.incidents ?? 0} · 工单 ${risk.summary?.work_orders ?? 0} · 设备故障 ${risk.summary?.device_faults ?? 0}`}
+                </p>
+              </div>
+              <Btn size="sm" variant="ghost" onClick={() => setRisk(null)}>关闭</Btn>
+            </div>
+
+            {risk.error ? (
+              <div className="p-5">
+                <EmptyState text="风险明细加载失败" hint={risk.error} />
+              </div>
+            ) : riskLoading ? (
+              <div className="p-5"><Loading text="正在取未闭环记录…" /></div>
+            ) : (
+              <div className="space-y-5 p-5">
+                {/* 安全事件 */}
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="flex items-center gap-1.5 text-[13px] font-medium text-slate-200">
+                      <TriangleAlert size={13} className="text-state-danger" /> 未闭环安全事件
+                    </h4>
+                    <span className="text-[11px] text-slate-500">{risk.incidents?.length ?? 0} 条</span>
+                  </div>
+                  {(risk.incidents ?? []).length === 0 ? (
+                    <p className="rounded-lg border border-white/8 px-3 py-2 text-xs text-slate-500">无</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {risk.incidents.map((x: any) => (
+                        <li key={x.id} className="rounded-lg border border-state-danger/25 bg-state-danger/[0.05] px-3 py-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-[13px] text-slate-100">{x.title}</span>
+                            <Tag tone={x.risk_level === 'HIGH' ? 'danger' : x.risk_level === 'MEDIUM' ? 'warn' : 'info'}>
+                              {x.risk_level === 'HIGH' ? '重大' : x.risk_level === 'MEDIUM' ? '较大' : '一般'}
+                            </Tag>
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {x.code} · {x.location ?? '—'}
+                            {x.found_at ? ` · 发现于 ${x.found_at.slice(0, 10)}` : ''}
+                          </p>
+                          <p className="mt-0.5 text-[11px] text-slate-500">
+                            责任人 {x.responsible_person ?? '—'}
+                            {x.rectify_deadline ? ` · 整改期限 ${x.rectify_deadline.slice(0, 10)}` : ''}
+                            {x.is_overdue ? ' · 已逾期' : ''}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {(risk.incidents ?? []).length > 0 && (
+                    <Btn size="sm" variant="ghost" className="mt-2" onClick={() => nav('/safety')}>去安全管理处理</Btn>
+                  )}
+                </section>
+
+                {/* 工单 */}
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="flex items-center gap-1.5 text-[13px] font-medium text-slate-200">
+                      <Wrench size={13} className="text-state-warn" /> 未闭环工单
+                    </h4>
+                    <span className="text-[11px] text-slate-500">{risk.work_orders?.length ?? 0} 条</span>
+                  </div>
+                  {(risk.work_orders ?? []).length === 0 ? (
+                    <p className="rounded-lg border border-white/8 px-3 py-2 text-xs text-slate-500">无</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {risk.work_orders.slice(0, 8).map((x: any) => (
+                        <li key={x.id} className="rounded-lg border border-white/8 px-3 py-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-[13px] text-slate-200">{x.title}</span>
+                            <Tag tone={x.priority === 'HIGH' || x.priority === 'URGENT' ? 'danger' : 'muted'}>
+                              {x.priority === 'URGENT' ? '紧急' : x.priority === 'HIGH' ? '高' : x.priority === 'MEDIUM' ? '中' : '低'}
+                            </Tag>
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {x.code} · 处理人 {x.assignee_name ?? '待派单'}
+                            {x.is_timeout ? ' · 已超时' : ''}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {(risk.work_orders ?? []).length > 0 && (
+                    <Btn size="sm" variant="ghost" className="mt-2" onClick={() => nav('/operations')}>去物业运维处理</Btn>
+                  )}
+                </section>
+
+                {/* 设备故障 */}
+                <section>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="flex items-center gap-1.5 text-[13px] font-medium text-slate-200">
+                      <Boxes size={13} className="text-slate-400" /> 故障设备
+                    </h4>
+                    <span className="text-[11px] text-slate-500">{risk.device_faults?.length ?? 0} 台</span>
+                  </div>
+                  {(risk.device_faults ?? []).length === 0 ? (
+                    <p className="rounded-lg border border-white/8 px-3 py-2 text-xs text-slate-500">无</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {risk.device_faults.map((x: any) => (
+                        <li key={x.id} className="rounded-lg border border-white/8 px-3 py-2 text-[13px] text-slate-200">
+                          {x.name}
+                          <span className="ml-2 text-[11px] text-slate-500">{x.device_type} · {x.code}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+
+                <p className="pt-1 text-[11px] text-slate-600">
+                  以上为该楼栋当前未闭环记录，数据实时取自安全事件、工单与设备台账。
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
