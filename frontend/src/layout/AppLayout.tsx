@@ -60,7 +60,10 @@ function ParkSwitcher() {
         <ChevronDown size={13} className={cx('transition-transform', open && 'rotate-180')} />
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-40 mt-1.5 min-w-[228px] animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel py-1 shadow-2xl shadow-black/50">
+        <div
+          className="absolute left-0 top-full mt-1.5 min-w-[228px] animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel py-1 shadow-2xl shadow-black/50"
+          style={{ zIndex: 9100, backgroundColor: '#0D1B2A' }}
+        >
           <button
             onClick={() => {
               setActiveParkId(null)
@@ -166,7 +169,10 @@ function UserMenu() {
         <span className="hidden text-[13px] text-slate-200 sm:block">{user.real_name}</span>
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-40 mt-1.5 w-64 animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel shadow-2xl shadow-black/50">
+        <div
+          className="absolute right-0 top-full mt-1.5 w-64 animate-fade-up overflow-hidden rounded-xl border border-white/10 bg-nav-panel shadow-2xl shadow-black/50"
+          style={{ zIndex: 9100, backgroundColor: '#0D1B2A' }}
+        >
           <div className="border-b border-white/8 px-4 py-3">
             <p className="text-sm font-medium text-slate-100">{user.real_name}</p>
             <p className="mt-0.5 font-num text-[11px] text-slate-500">{user.username}</p>
@@ -338,7 +344,10 @@ export function AppLayout() {
 
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">
         {/* 顶栏 */}
-        <header className="relative z-30 flex h-[58px] shrink-0 items-center gap-3 border-b border-white/8 bg-nav-base/70 px-4 backdrop-blur-xl">
+        <header
+        className="relative flex h-[58px] shrink-0 items-center gap-3 border-b border-white/8 bg-nav-base/70 px-4 backdrop-blur-xl"
+        style={{ zIndex: 9000, isolation: 'isolate' }}
+      >
           <button
             onClick={() => setMobileOpen(true)}
             className="rounded-lg border border-white/10 bg-white/[0.05] p-2 text-slate-300 lg:hidden"
@@ -378,7 +387,10 @@ export function AppLayout() {
         </header>
 
         {/* 内容区 */}
-        <main className="flex-1 overflow-y-auto px-4 py-5 lg:px-6">
+        <main
+        className="relative flex-1 overflow-y-auto px-4 py-5 lg:px-6"
+        style={{ zIndex: 0 }}
+      >
           <Outlet />
         </main>
       </div>

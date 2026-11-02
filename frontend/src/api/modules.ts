@@ -76,6 +76,8 @@ export const spaceApi = {
   buildings: (park_id?: number | null, page_size = 50) =>
     api.get<any>('/space/buildings', { park_id, page_size }),
   building: (id: number) => api.get<any>(`/space/buildings/${id}`),
+  /** 楼栋未闭环风险明细：安全事件 / 工单 / 设备故障 */
+  buildingRisks: (id: number) => api.get<any>(`/space/buildings/${id}/risks`),
   twin: (park_id: number) => api.get<any>(`/space/parks/${park_id}/twin`),
   board: (building_id: number) =>
     api.get<any>(`/space/spaces/board/${building_id}`),

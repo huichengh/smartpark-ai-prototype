@@ -385,3 +385,58 @@ def space_board(building_id: int, db: DbSession, auth: CurrentAuth) -> dict[str,
         ],
         "data_label": "演示数据",
     }
+
+
+@router.get("/buildings/{building_id}/risks")
+def building_risks(building_id: int, db: DbSession, auth: CurrentAuth) -> dict[str, Any]:
+    """楼栋风险明细 —— 让"存在风险"这句提示可以点开看到具体是哪几条。
+
+    原来孪生面板只给了一个计数和一句"有 N 起未闭环安全事件"，使用者无法判断
+    该不该现在处理。这里把三类未闭环记录逐条列出来：安全事件、工单、设备故障。
+    """
+    auth.require("space", "VIEW")
+    b = db.get(Building, building_id)
+    if not b or not auth.can_access_park(b.park_id):
+        raise HTTPException(404, "楼栋不存在或无权访问")
+
+    incidents = [x for x in db.scalars(
+        select(SafetyIncident).where(SafetyIncident.building_id == building_id)
+        .order_by(SafetyIncident.found_at.desc())).all() if x.status != "CLOSED"]
+
+    orders = [x for x in db.scalars(
+        select(WorkOrder).where(WorkOrder.building_id == building_id)
+        .order_by(WorkOrder.submit_at.desc())).all()
+        if x.status not in ("CLOSED", "RATED")]
+
+    devices = [x for x in db.scalars(
+        select(Device).where(Device.building_id == building_id)).all()
+        if x.status == "FAULT"]
+
+    return {
+        "building": {"id": b.id, "building_code": b.building_code,
+                     "building_name": b.building_name, "park_id": b.park_id},
+        "incidents": [{
+            "id": x.id, "code": x.incident_code, "title": x.title,
+            "risk_level": x.risk_level, "status": x.status,
+            "location": x.location,
+            "found_at": x.found_at.isoformat() if x.found_at else None,
+            "responsible_person": x.responsible_person,
+            "rectify_deadline": x.rectify_deadline.isoformat() if x.rectify_deadline else None,
+            "is_overdue": bool(x.is_overdue),
+        } for x in incidents],
+        "work_orders": [{
+            "id": x.id, "code": x.order_code, "title": x.title,
+            "order_type": x.order_type, "priority": x.priority, "status": x.status,
+            "assignee_name": x.assignee_name, "location": x.location,
+            "sla_hours": x.sla_hours, "is_timeout": bool(x.is_timeout),
+            "submit_at": x.submit_at.isoformat() if x.submit_at else None,
+        } for x in orders],
+        "device_faults": [{
+            "id": x.id, "code": x.device_code, "name": x.device_name,
+            "device_type": x.device_type, "status": x.status,
+            "location": getattr(x, "location", None),
+        } for x in devices],
+        "summary": {"incidents": len(incidents), "work_orders": len(orders),
+                    "device_faults": len(devices)},
+        "data_label": "演示数据",
+    }
