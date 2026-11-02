@@ -7,7 +7,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { spaceApi } from '@/api/modules'
-import { useAsync } from '@/hooks/useAsync'
+import { createPortal } from 'react-dom'
+import { useNavigate } from 'react-router-dom'
+import { useAsync, pushToast } from '@/hooks/useAsync'
 import { useAuth } from '@/context/AuthContext'
 import {
   Btn, DataTable, EmptyState, ErrorState, Field, KpiCard, Loading,
@@ -47,6 +49,7 @@ type AnyRow = Record<string, any>
 /* ------------------------------------------------------------------ 页面 */
 
 export default function Space() {
+  const nav = useNavigate()
   const { activeParkId } = useAuth()
   const [params, setParams] = useSearchParams()
 
@@ -72,6 +75,23 @@ export default function Space() {
     }),
     [activeParkId, buildingId, status, type, page],
   )
+
+  // 空间详情抽屉：楼层看板的每个格子都能点开看到是谁在租、租到什么时候
+  const [spaceDetail, setSpaceDetail] = useState<any>(null)
+  const [spaceLoading, setSpaceLoading] = useState(false)
+
+  const openSpace = async (spaceId: number) => {
+    setSpaceLoading(true)
+    setSpaceDetail({ id: spaceId })
+    try {
+      setSpaceDetail(await spaceApi.space(spaceId))
+    } catch (e: any) {
+      pushToast('err', e?.message || '空间详情加载失败')
+      setSpaceDetail(null)
+    } finally {
+      setSpaceLoading(false)
+    }
+  }
 
   const board = useAsync(
     () => spaceApi.board(buildingId as number),
@@ -245,7 +265,8 @@ export default function Space() {
           ) : board.error ? (
             <ErrorState error={board.error} onRetry={board.reload} />
           ) : (
-            <BoardView data={board.data} />
+            <BoardView data={board.data} onOpen={openSpace} />
+
           )}
         </Panel>
       )}
@@ -336,13 +357,158 @@ export default function Space() {
           </Panel>
         </div>
       )}
+      {/* ---------------------------------------------- 空间详情抽屉 */}
+      {spaceDetail && createPortal(
+        <div
+          className="fixed inset-0 flex justify-end bg-black/55 backdrop-blur-sm"
+          style={{ zIndex: 9200 }}
+          onClick={() => setSpaceDetail(null)}
+        >
+          <div
+            className="h-full w-full max-w-md overflow-y-auto border-l border-white/10"
+            style={{ backgroundColor: '#0D1B2A' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="sticky top-0 flex items-start justify-between gap-3 border-b border-white/8 px-5 py-4"
+              style={{ backgroundColor: '#0D1B2A' }}
+            >
+              <div>
+                <h3 className="text-[15px] font-semibold text-slate-100">
+                  {spaceDetail.space?.space_name ?? spaceDetail.space?.space_code ?? '空间详情'}
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  {spaceLoading ? '加载中…' : [
+                    spaceDetail.building?.building_name,
+                    spaceDetail.floor?.floor_name,
+                    spaceDetail.space?.space_code,
+                  ].filter(Boolean).join(' · ')}
+                </p>
+              </div>
+              <Btn size="sm" variant="ghost" onClick={() => setSpaceDetail(null)}>关闭</Btn>
+            </div>
+
+            {spaceLoading ? (
+              <div className="p-5"><Loading text="正在读取空间信息…" /></div>
+            ) : (
+              <div className="space-y-5 p-5">
+                {/* 基本属性 */}
+                <section className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-white/8 px-3 py-2">
+                    <p className="text-[10px] text-slate-500">状态</p>
+                    <div className="mt-1">
+                      <Tag tone={(SPACE_STATUS[spaceDetail.space?.status]?.tone ?? 'muted') as any}>
+                        {SPACE_STATUS[spaceDetail.space?.status]?.label ?? spaceDetail.space?.status ?? '—'}
+                      </Tag>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-white/8 px-3 py-2">
+                    <p className="text-[10px] text-slate-500">可租面积</p>
+                    <p className="mt-0.5 font-num text-sm text-slate-200">
+                      {Number(spaceDetail.space?.rentable_area ?? spaceDetail.space?.area ?? 0).toLocaleString()} ㎡
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-white/8 px-3 py-2">
+                    <p className="text-[10px] text-slate-500">挂牌租金</p>
+                    <p className="mt-0.5 font-num text-sm text-slate-200">
+                      {spaceDetail.space?.rent_price ?? '—'} 元/㎡/月
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-white/8 px-3 py-2">
+                    <p className="text-[10px] text-slate-500">物业费</p>
+                    <p className="mt-0.5 font-num text-sm text-slate-200">
+                      {spaceDetail.space?.property_price ?? '—'} 元/㎡/月
+                    </p>
+                  </div>
+                  {spaceDetail.space?.vacant_since && (
+                    <div className="col-span-2 rounded-lg border border-state-warn/25 bg-state-warn/[0.06] px-3 py-2 text-[11px] text-state-warn">
+                      空置起始于 {spaceDetail.space.vacant_since}，
+                      已空置 {Math.max(0, Math.floor((Date.now() - new Date(spaceDetail.space.vacant_since).getTime()) / 86400000))} 天
+                    </div>
+                  )}
+                </section>
+
+                {/* 承租企业 */}
+                <section>
+                  <h4 className="mb-2 text-[13px] font-medium text-slate-200">承租企业</h4>
+                  {spaceDetail.enterprise ? (
+                    <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-[13px] text-slate-100">{spaceDetail.enterprise.enterprise_name}</span>
+                        <Tag tone="ok">{spaceDetail.enterprise.status === 'SETTLED' ? '入驻' : spaceDetail.enterprise.status === 'GROWING' ? '成长' : spaceDetail.enterprise.status}</Tag>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-500">{spaceDetail.enterprise.industry ?? '行业未填写'}</p>
+                      <Btn size="sm" variant="ghost" className="mt-2"
+                           onClick={() => { setSpaceDetail(null); nav(`/enterprise?id=${spaceDetail.enterprise.id}`) }}>
+                        查看企业档案
+                      </Btn>
+                    </div>
+                  ) : (
+                    <p className="rounded-lg border border-white/8 px-3 py-2 text-xs text-slate-500">
+                      该空间暂无承租企业
+                    </p>
+                  )}
+                </section>
+
+                {/* 合同 */}
+                <section>
+                  <h4 className="mb-2 text-[13px] font-medium text-slate-200">
+                    租赁合同 <span className="ml-1 text-[11px] text-slate-500">{spaceDetail.contracts?.length ?? 0} 份</span>
+                  </h4>
+                  {(spaceDetail.contracts ?? []).length === 0 ? (
+                    <p className="rounded-lg border border-white/8 px-3 py-2 text-xs text-slate-500">无合同记录</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {spaceDetail.contracts.map((c: any) => (
+                        <li key={c.id} className="rounded-lg border border-white/8 px-3 py-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-[12px] text-slate-200">{c.contract_code}</span>
+                            <Tag tone={c.status === 'ACTIVE' ? 'ok' : c.status === 'EXPIRING' ? 'warn' : 'muted'}>
+                              {c.status === 'ACTIVE' ? '生效中' : c.status === 'EXPIRING' ? '即将到期' : c.status}
+                            </Tag>
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            {c.start_date ?? '—'} 至 {c.end_date ?? '—'} · 月租金 {Number(c.monthly_rent ?? 0).toLocaleString()} 元
+                            {c.multi_space ? ' · 合并签约，覆盖该企业多间空间' : ''}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+
+                {/* 工单 */}
+                {(spaceDetail.work_orders ?? []).length > 0 && (
+                  <section>
+                    <h4 className="mb-2 text-[13px] font-medium text-slate-200">相关工单</h4>
+                    <ul className="space-y-1.5">
+                      {spaceDetail.work_orders.slice(0, 5).map((o: any) => (
+                        <li key={o.id} className="flex items-center justify-between gap-2 text-[12px] text-slate-300">
+                          <span className="truncate">{o.title}</span>
+                          <span className="shrink-0 text-[11px] text-slate-500">{o.status}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+
+                <p className="pt-1 text-[11px] text-slate-600">
+                  租用登记与合同变更请到「合同管理」办理，这里只做查看，避免出现"已出租但无合同"的状态。
+                </p>
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body,
+      )}
+
     </div>
   )
 }
 
 /* -------------------------------------------------------- 楼层看板子组件 */
 
-function BoardView({ data }: { data: any }) {
+function BoardView({ data, onOpen }: { data: any; onOpen: (id: number) => void }) {
   if (!data) return <EmptyState text="暂无楼层数据" />
 
   const rows: AnyRow[] = data.rows ?? []
@@ -388,16 +554,20 @@ function BoardView({ data }: { data: any }) {
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {(f.spaces ?? []).map((s: AnyRow) => (
-                  <div
+                  // 按楼层分组的看板才是实际渲染的那一支；原来这里是不可点的 div，
+                  // 点不进去也看不到承租企业
+                  <button
                     key={s.id}
-                    title={`${s.space_code ?? ''} ${s.space_name ?? ''}｜${labelOf(s.status)}｜${Number(s.area ?? 0).toLocaleString()}㎡`}
-                    className="h-9 w-16 cursor-default rounded border transition-transform hover:scale-105"
+                    type="button"
+                    onClick={() => onOpen(s.id)}
+                    title={`${s.space_code ?? ''} ${s.space_name ?? ''}｜${labelOf(s.status)}｜${Number(s.area ?? 0).toLocaleString()}㎡（点击查看详情）`}
+                    className="h-9 w-16 rounded border transition-transform hover:scale-105 hover:brightness-150 focus:outline-none focus:ring-1 focus:ring-brand-400"
                     style={{ background: `${colorOf(s.status)}33`, borderColor: `${colorOf(s.status)}88` }}
                   >
                     <span className="flex h-full items-center justify-center text-[10px] font-medium text-slate-100">
                       {String(s.space_code ?? s.space_name ?? '').slice(-5)}
                     </span>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -406,16 +576,18 @@ function BoardView({ data }: { data: any }) {
       ) : (
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8">
           {rows.map((s) => (
-            <div
+            <button
               key={s.id}
-              title={`${s.space_code ?? ''} ${s.space_name ?? ''}｜${labelOf(s.status)}｜${Number(s.area ?? 0).toLocaleString()}㎡`}
-              className="rounded-lg border p-2.5 transition-transform hover:scale-[1.03]"
+              type="button"
+              onClick={() => onOpen(s.id)}
+              title={`${s.space_code ?? ''} ${s.space_name ?? ''}｜${labelOf(s.status)}｜${Number(s.area ?? 0).toLocaleString()}㎡（点击查看详情）`}
+              className="rounded-lg border p-2.5 text-left transition-transform hover:scale-[1.03] hover:brightness-125"
               style={{ background: `${colorOf(s.status)}22`, borderColor: `${colorOf(s.status)}66` }}
             >
               <div className="truncate text-[11px] font-medium text-slate-100">{s.space_code ?? `#${s.id}`}</div>
               <div className="mt-1 text-[10px] text-slate-400">{labelOf(s.status)}</div>
               <div className="font-num text-[10px] text-slate-500">{Number(s.area ?? 0).toLocaleString()} ㎡</div>
-            </div>
+            </button>
           ))}
         </div>
       )}
