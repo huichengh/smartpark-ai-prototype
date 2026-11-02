@@ -11,6 +11,7 @@
  * 楼栋颜色一律取自后端 legend，避免前后端配色口径不一致。
  */
 import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import {
   Boxes,
@@ -625,7 +626,7 @@ export default function Twin() {
 
 
       {/* ---------------------------------------------- 风险明细抽屉 */}
-      {risk && (
+      {risk && createPortal(
         <div
           className="fixed inset-0 flex justify-end bg-black/55 backdrop-blur-sm"
           style={{ zIndex: 9200 }}
@@ -755,7 +756,8 @@ export default function Twin() {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       <p className="pb-2 text-center text-[11px] text-slate-600">
