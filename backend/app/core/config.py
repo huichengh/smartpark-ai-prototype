@@ -6,6 +6,18 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+# 读取 backend/.env（不覆盖已有的系统环境变量）。
+# 这样切换大模型只需要改一个被 gitignore 的文件，不必每次开新终端都 set 一遍。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+except Exception:  # 没装 python-dotenv 时静默跳过，不影响只用规则模式
+    pass
+
+
 from functools import lru_cache
 from pathlib import Path
 

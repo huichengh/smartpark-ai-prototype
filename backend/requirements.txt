@@ -34,3 +34,4 @@ scikit-learn>=1.4
 # ---- 缓存与异步任务（演示环境可选，架构已预留）----
 # redis>=5.0
 # celery>=5.3
+python-dotenv>=1.0.0   # 读取 backend/.env（切换大模型用）

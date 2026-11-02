@@ -54,8 +54,19 @@ def config() -> dict[str, Any]:
 
 
 def enabled() -> bool:
-    """是否启用大模型路径。rule 模式下永远走规则。"""
-    return config()["mode"] in ("auto", "llm") and bool(config()["base_url"])
+    """是否启用大模型路径。
+
+    除 mode 之外还有一条：云端端点必须填了 key 才算启用。
+    否则每次问答都会先发一个注定 401 的请求再回落，白等几秒还刷日志。
+    本地 Ollama 不需要 key，照常放行。
+    """
+    cfg = config()
+    if cfg["mode"] not in ("auto", "llm") or not cfg["base_url"]:
+        return False
+    url = cfg["base_url"]
+    if "127.0.0.1" in url or "localhost" in url:
+        return True
+    return bool(cfg["api_key"]) and cfg["api_key"] != "not-needed"
 
 
 def is_forced_llm() -> bool:
@@ -440,7 +451,15 @@ def status() -> dict[str, Any]:
         "tool_count": len(TOOL_REGISTRY),
     }
     if not enabled():
-        info["error"] = "AGENT_MODE=rule，未启用大模型"
+        if cfg["mode"] == "rule":
+            info["error"] = "AGENT_MODE=rule，当前只用规则推理"
+        elif not cfg["base_url"]:
+            info["error"] = "未配置 LLM_BASE_URL"
+        elif "127.0.0.1" not in cfg["base_url"] and "localhost" not in cfg["base_url"] \
+                and cfg["api_key"] in ("", "not-needed"):
+            info["error"] = "云端端点未配置 LLM_API_KEY（填在 backend/.env 后重启即可生效）"
+        else:
+            info["error"] = "未启用大模型"
         return info
     try:
         data = _post({
