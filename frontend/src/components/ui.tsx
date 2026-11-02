@@ -91,6 +91,7 @@ export function KpiCard({
   delta,
   deltaLabel,
   hint,
+  explain,
   tone = 'brand',
   icon,
   loading,
@@ -102,6 +103,8 @@ export function KpiCard({
   delta?: number | null
   deltaLabel?: string
   hint?: ReactNode
+  /** 悬停才显示的口径说明：卡片上只留一句人话，算法藏在提示里 */
+  explain?: string
   tone?: Tone
   icon?: ReactNode
   loading?: boolean
@@ -128,7 +131,10 @@ export function KpiCard({
   }
 
   return (
-    <div className="group relative overflow-hidden rounded-card border border-white/8 bg-panel-grad p-4 shadow-glass backdrop-blur-[14px] transition-all duration-300 hover:shadow-glass-hover">
+    <div
+      className="group relative overflow-hidden rounded-card border border-white/8 bg-panel-grad p-4 shadow-glass backdrop-blur-[14px] transition-all duration-300 hover:shadow-glass-hover"
+      title={explain}
+    >
       <div
         className={cx(
           'pointer-events-none absolute -right-8 -top-10 h-28 w-28 rounded-full bg-gradient-to-br blur-2xl',
@@ -136,7 +142,14 @@ export function KpiCard({
         )}
       />
       <div className="relative flex items-start justify-between gap-2">
-        <span className="text-xs font-medium tracking-wide text-slate-400">{label}</span>
+        <span className="flex items-center gap-1 text-xs font-medium tracking-wide text-slate-400">
+          {label}
+          {explain && (
+            <span className="cursor-help rounded-full border border-white/20 px-1 text-[9px] leading-[13px] text-slate-500">
+              ?
+            </span>
+          )}
+        </span>
         {icon && <span className={cx('opacity-70', toneText[tone])}>{icon}</span>}
       </div>
       <div className="relative mt-2 flex items-baseline gap-1">
@@ -172,6 +185,27 @@ export function KpiCard({
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * 术语注解：术语照留（专业感与答辩深度不丢），白话解释悬停才出现。
+ *
+ * 为什么不做成常显：界面上「口径」「净经营贡献」这类词一多，非专业读者会卡住；
+ * 但全改成大白话又会让懂行的人觉得不严谨。折中就是——字面上保留行业说法，
+ * 鼠标移上去给一句人话。虚线底纹是「这里有解释」的可见提示，否则没人会去悬停。
+ */
+export function Term({ children, explain }: { children: ReactNode; explain: ReactNode }) {
+  return (
+    <span className="group/term relative inline-block cursor-help border-b border-dashed border-slate-500/50 leading-tight">
+      {children}
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute bottom-full left-0 z-30 mb-1.5 hidden w-64 rounded-lg border border-white/12 bg-[#0A1628] px-3 py-2 text-[11px] font-normal leading-relaxed text-slate-300 shadow-xl group-hover/term:block"
+      >
+        {explain}
+      </span>
+    </span>
   )
 }
 
