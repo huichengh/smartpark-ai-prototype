@@ -55,9 +55,11 @@ export default function Login() {
         {/* 品牌区 */}
         <div className="hidden flex-col justify-center lg:flex">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand-grad shadow-glow-brand">
-              <Sparkles size={22} className="text-white" />
-            </div>
+            <img
+              src="/brand/mark.png"
+              alt="园智汇 ParkOS"
+              className="h-11 w-11 rounded-xl shadow-glow-brand"
+            />
             <div>
               <h1 className="text-2xl font-semibold tracking-tight text-slate-50">园智汇</h1>
               <p className="text-[13px] text-slate-400">AI 产业园区智慧运营管理平台</p>
@@ -95,9 +97,7 @@ export default function Login() {
         {/* 表单区 */}
         <div className="rounded-panel border border-white/10 bg-panel-grad p-6 shadow-glass backdrop-blur-[16px]">
           <div className="flex items-center gap-2.5 lg:hidden">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-grad">
-              <Sparkles size={17} className="text-white" />
-            </div>
+            <img src="/brand/mark.png" alt="园智汇 ParkOS" className="h-9 w-9 rounded-lg" />
             <div>
               <p className="text-base font-semibold text-slate-50">园智汇</p>
               <p className="text-[11px] text-slate-500">AI 产业园区智慧运营平台</p>

@@ -253,9 +253,11 @@ export function AppLayout() {
     >
       {/* Logo */}
       <div className="flex h-[58px] shrink-0 items-center gap-2.5 border-b border-white/8 px-4">
-        <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-grad shadow-glow-brand">
-          <Sparkles size={16} className="text-white" />
-        </div>
+        <img
+          src="/brand/mark.png"
+          alt="园智汇 ParkOS"
+          className="h-8 w-8 shrink-0 rounded-lg shadow-glow-brand"
+        />
         {!collapsed && (
           <div className="min-w-0">
             <p className="truncate text-[13px] font-semibold tracking-tight text-slate-50">
