@@ -13,6 +13,12 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 
+    # 只在"本机"读取密钥：优先用户目录下的文件，其次项目内 .env。
+    # 之所以挪出项目目录——部署时整个 backend/ 会被打包上传，
+    # 放在里面的 .env 会跟着上到公网，等于把 key 交给所有访问者。
+    _external = Path.home() / ".workbuddy" / "smartpark.env"
+    if _external.exists():
+        load_dotenv(_external, override=False)
     load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 except Exception:  # 没装 python-dotenv 时静默跳过，不影响只用规则模式
     pass
